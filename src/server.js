@@ -83,10 +83,10 @@ app.delete('/mcp', (req, res) => {
     res.status(405).set('Allow', 'POST').send('Method Not Allowed');
 });
 
-const port = 3000;
-app.listen(port, () => {
-    l.debug(`Listening on http://localhost:${port}`);
-});
+// const port = 3000;
+// app.listen(port, () => {
+//     l.debug(`Listening on http://localhost:${port}`);
+// });
 
 import serverlessExpress from '@codegenie/serverless-express';
 export const handler = serverlessExpress({ app });
