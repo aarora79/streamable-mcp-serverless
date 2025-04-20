@@ -59,6 +59,8 @@ function printHelp(): void {
   console.log('  get-prompt [name] [args]   - Get a prompt with optional JSON arguments');
   console.log('  list-resources             - List available resources');
   console.log('  bedrock-stats <region> <log_group> <days> [account_id] - Get Bedrock usage stats');
+  console.log('  stats                      - Get default Bedrock daily usage stats (us-east-1, /aws/bedrock/modelinvocations, 1 day, streams results via notifications)');
+  console.log('  stats-report [region] [log_group] [days] [account_id] - Get Bedrock daily usage report (returns full report, defaults: us-east-1, /aws/bedrock/modelinvocations, 1 day)');
   console.log('  help                       - Show this help');
   console.log('  quit                       - Exit the program');
 }
@@ -162,6 +164,60 @@ function commandLoop(): void {
               await callBedrockStatsTool(region, logGroupName, days, awsAccountId);
             }
           }
+          break;
+        }
+
+        case 'stats': {
+          const defaultRegion = 'us-east-1';
+          const defaultLogGroup = '/aws/bedrock/modelinvocations';
+          const defaultDays = 1;
+          console.log(`Running stats with defaults: region=${defaultRegion}, log_group=${defaultLogGroup}, days=${defaultDays}`);
+          await callBedrockStatsTool(defaultRegion, defaultLogGroup, defaultDays);
+          break;
+        }
+
+        case 'stats-report': {
+          let region = 'us-east-1';
+          let logGroupName = '/aws/bedrock/modelinvocations';
+          let days = 1;
+          let awsAccountId: string | undefined = undefined;
+          let useDefaults = true;
+
+          if (args.length > 1) {
+            if (args.length < 4) {
+              console.log('Usage: stats-report [region log_group_name days [aws_account_id]]');
+              console.log('(Provide all 3 required args or none to use defaults)');
+              break;
+            }
+            useDefaults = false;
+            region = args[1];
+            logGroupName = args[2];
+            const parsedDays = parseInt(args[3], 10);
+            awsAccountId = args[4];
+
+            if (isNaN(parsedDays) || parsedDays <= 0) {
+              console.log('Invalid number of days. Must be a positive integer.');
+              break;
+            }
+            days = parsedDays;
+          }
+
+          if (useDefaults) {
+            console.log(`Running stats-report with defaults: region=${region}, log_group=${logGroupName}, days=${days}`);
+          } else {
+            console.log(`Running stats-report with args: region=${region}, log_group=${logGroupName}, days=${days}${awsAccountId ? ", account=" + awsAccountId : ""}`);
+          }
+
+          const toolArgs: Record<string, unknown> = {
+            region: region,
+            log_group_name: logGroupName,
+            days: days,
+          };
+          if (awsAccountId) {
+            toolArgs.aws_account_id = awsAccountId;
+          }
+
+          await callTool('get_bedrock_report', toolArgs);
           break;
         }
 

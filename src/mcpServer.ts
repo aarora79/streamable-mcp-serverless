@@ -289,4 +289,108 @@ server.tool(
     }
 );
 
+// Tool: Bedrock Daily Usage Report (Non-Streaming Version)
+server.tool(
+    "get_bedrock_report",
+    "Get Bedrock daily usage report",
+    // Define schema directly as an object literal
+    {
+        region: z.string().describe("AWS region for CloudWatch Logs"),
+        log_group_name: z.string().describe("Name of the CloudWatch log group containing Bedrock logs"),
+        days: z.number().int().positive().describe("Number of past days to fetch logs for"),
+        aws_account_id: z.string().optional().describe("AWS Account ID if using cross-account access"),
+    },
+    // Standard async function returning the full report
+    async (args, extra): Promise<CallToolResult> => {
+        console.log("Executing get_bedrock_report (non-streaming) with args:", args);
+        try {
+            const logs = await getBedrockLogs(args);
+
+            if (!logs || logs.length === 0) {
+                return { content: [{ type: "text", text: "No Bedrock usage data found for the specified period." }] };
+            }
+
+            // --- Data Aggregation (Same as before) ---
+            const dailyStats: { [date: string]: { regions: any, models: any, users: any, requests: number, inputTokens: number, completionTokens: number, totalTokens: number } } = {};
+            let totalRequests = 0;
+            let totalInputTokens = 0;
+            let totalCompletionTokens = 0;
+            let totalTokens = 0;
+            const regionSummary: { [region: string]: { requests: number, input: number, completion: number, total: number } } = {};
+            const modelSummary: { [modelId: string]: { requests: number, input: number, completion: number, total: number } } = {};
+            const userSummary: { [userId: string]: { requests: number, input: number, completion: number, total: number } } = {};
+
+            logs.forEach(log => {
+                totalRequests++;
+                totalInputTokens += log.inputTokens || 0;
+                totalCompletionTokens += log.completionTokens || 0;
+                totalTokens += log.totalTokens || 0;
+                const date = new Date(log.timestamp).toISOString().split('T')[0];
+                if (!dailyStats[date]) {
+                    dailyStats[date] = { regions: {}, models: {}, users: {}, requests: 0, inputTokens: 0, completionTokens: 0, totalTokens: 0 };
+                }
+                dailyStats[date].requests++;
+                dailyStats[date].inputTokens += log.inputTokens || 0;
+                dailyStats[date].completionTokens += log.completionTokens || 0;
+                dailyStats[date].totalTokens += log.totalTokens || 0;
+                if (!regionSummary[log.region]) regionSummary[log.region] = { requests: 0, input: 0, completion: 0, total: 0 };
+                regionSummary[log.region].requests++;
+                regionSummary[log.region].input += log.inputTokens || 0;
+                regionSummary[log.region].completion += log.completionTokens || 0;
+                regionSummary[log.region].total += log.totalTokens || 0;
+                const simpleModelId = log.modelId?.includes('.') ? log.modelId.split('.').pop()! : log.modelId?.split('/').pop() || 'unknown';
+                if (!modelSummary[simpleModelId]) modelSummary[simpleModelId] = { requests: 0, input: 0, completion: 0, total: 0 };
+                modelSummary[simpleModelId].requests++;
+                modelSummary[simpleModelId].input += log.inputTokens || 0;
+                modelSummary[simpleModelId].completion += log.completionTokens || 0;
+                modelSummary[simpleModelId].total += log.totalTokens || 0;
+                 if (log.userId) {
+                     if (!userSummary[log.userId]) userSummary[log.userId] = { requests: 0, input: 0, completion: 0, total: 0 };
+                     userSummary[log.userId].requests++;
+                     userSummary[log.userId].input += log.inputTokens || 0;
+                     userSummary[log.userId].completion += log.completionTokens || 0;
+                     userSummary[log.userId].total += log.totalTokens || 0;
+                 }
+            });
+
+            // --- Formatting Output (Single String) ---
+            let output = `Bedrock Daily Usage Report (Past ${args.days} days - ${args.region})\n`;
+            output += `Total Requests: ${totalRequests}\n`;
+            output += `Total Input Tokens: ${totalInputTokens}\n`;
+            output += `Total Completion Tokens: ${totalCompletionTokens}\n`;
+            output += `Total Tokens: ${totalTokens}\n`;
+
+            output += "\n--- Daily Totals ---\n";
+            Object.entries(dailyStats).sort(([dateA], [dateB]) => dateA.localeCompare(dateB)).forEach(([date, stats]) => {
+                output += `${date}: Requests=${stats.requests}, Input=${stats.inputTokens}, Completion=${stats.completionTokens}, Total=${stats.totalTokens}\n`;
+            });
+
+            output += "\n--- Region Summary ---\n";
+            Object.entries(regionSummary).forEach(([region, stats]) => {
+                output += `${region}: Requests=${stats.requests}, Input=${stats.input}, Completion=${stats.completion}, Total=${stats.total}\n`;
+            });
+
+            output += "\n--- Model Summary ---\n";
+            Object.entries(modelSummary).forEach(([model, stats]) => {
+                output += `${model}: Requests=${stats.requests}, Input=${stats.input}, Completion=${stats.completion}, Total=${stats.total}\n`;
+            });
+
+            if (Object.keys(userSummary).length > 0) {
+                output += "\n--- User Summary ---\n";
+                Object.entries(userSummary).forEach(([user, stats]) => {
+                    output += `${user}: Requests=${stats.requests}, Input=${stats.input}, Completion=${stats.completion}, Total=${stats.total}\n`;
+                });
+            }
+
+            // Return the full report string
+            return { content: [{ type: "text", text: output.trimEnd() }] };
+
+        } catch (error: any) {
+            console.error("Error in get_bedrock_report tool:", error);
+            // Return an error result
+            return { content: [{ type: "text", text: `Error getting Bedrock report: ${error.message}` }], isError: true };
+        }
+    }
+);
+
 export default server; 
