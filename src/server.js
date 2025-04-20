@@ -4,7 +4,7 @@ import express from "express";
 import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { InitializeRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import mcpServer from './mcpServer.js';
+import server from './mcpServer.ts';
 
 const l = log4js.getLogger();
 
@@ -45,7 +45,7 @@ app.post('/mcp', async (req, res) => {
             }
         });
 
-        await mcpServer.connect(transport);
+        await server.connect(transport);
     } else {
         l.debug(`Invalid request, no sessionId`);
         res.status(400).json({
@@ -83,10 +83,10 @@ app.delete('/mcp', (req, res) => {
     res.status(405).set('Allow', 'POST').send('Method Not Allowed');
 });
 
-// const port = 3000;
-// app.listen(port, () => {
-//     l.debug(`Listening on http://localhost:${port}`);
-// });
+const port = 3000;
+app.listen(port, () => {
+    l.debug(`Listening on http://localhost:${port}`);
+});
 
-import serverlessExpress from '@codegenie/serverless-express';
-export const handler = serverlessExpress({ app });
+// import serverlessExpress from '@codegenie/serverless-express';
+// export const handler = serverlessExpress({ app });
