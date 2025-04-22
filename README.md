@@ -4,7 +4,7 @@ This project deploys a Model Context Protocol (MCP) server as a containerized ap
 
 The MCP server and client in this repo are both written in TypeScript. The server is built as a container and deployed on a Lambda and is available as an endpoint via an API Gateway. 
 
->Note: as of 4/22/2025 Lambda supports HTTP Streaming for Node.js managed runtime ([link](https://docs.aws.amazon.com/lambda/latest/dg/configuration-response-streaming.html)). API Gateway does not support Service Side Events (SSE).
+>Note: as of 4/22/2025 Lambda supports HTTP Streaming for Node.js managed runtime ([link](https://docs.aws.amazon.com/lambda/latest/dg/configuration-response-streaming.html)). API Gateway does not support Service Side Events (SSE) which is why Streamable HTTP comes in handy and we can now deploy an MCP server on Lambda and API Gateway.
 
 The MCP server in this repo provides a tool to get a summary of the spend on Amazon Bedrock in a given AWS account.
 
