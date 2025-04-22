@@ -18,4 +18,4 @@ COPY src/ ./src/
 RUN npx tsc
 
 # Set the CMD to your handler
-CMD [ "dist/server.handler" ] 
+CMD [ "dist/server.handler" ]
