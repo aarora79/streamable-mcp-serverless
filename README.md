@@ -146,3 +146,15 @@ The client will automatically:
 
 ## Known issues:
 - Client sometimes fails to call tools, this can be resolved by restarting the client or establishing connection again.
+
+## Acknowledgments
+
+This project was developed with the support of the following technologies and services:
+
+- [AWS Lambda](https://aws.amazon.com/lambda/) for serverless computing
+- [AWS API Gateway](https://aws.amazon.com/api-gateway/) for API management
+- [AWS Bedrock](https://aws.amazon.com/bedrock/) for foundation models
+- [Model Context Protocol](https://modelcontextprotocol.io/) for the communication protocol
+- [Node.js](https://nodejs.org/) and [TypeScript](https://www.typescriptlang.org/) for the implementation
+- [Express.js](https://expressjs.com/) for the web server framework
+
