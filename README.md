@@ -1,4 +1,4 @@
-# Simple MCP Server on Lambda (Container Image)
+# Deploying Bedrock usage logs MCP Server on AWS Lambda
 
 This project deploys a Model Context Protocol (MCP) server as a containerized application on AWS Lambda, accessible via API Gateway.
 
@@ -122,7 +122,27 @@ The server implements the following tools:
 
 ## Connecting to the Server
 
-Use the **API Gateway URL** provided in the deployment script's output summary.
+After deployment, you can connect to the server using the `client.ts` script:
 
-1. Install dependencies:
+1. Set the required environment variables:
+   ```bash
+   export MCP_SERVER_URL="https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp"
    ```
+2. Install dependencies:
+    ```bash
+    npm install
+    ```
+
+2. Run the client:
+   ```bash
+   npx tsx src/client.ts
+   ```
+
+The client will automatically:
+- Initialize a connection with the server
+- Handle session management
+- Provide an interactive interface for using the available tools
+
+
+## Known issues:
+- Client sometimes fails to call tools, this can be resolved by restarting the client or establishing connection again.
