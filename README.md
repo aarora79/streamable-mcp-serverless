@@ -121,7 +121,7 @@ The server implements the following tools:
     ```bash
     python deploy.py \
       --function-name bedrock-spend-mcp-server \
-      --role-arn arn:aws:iam::015469603702:role/fmbench-orchestrator \
+      --role-arn <lambda-role-arn> \
       --region us-east-1 \
       --memory 2048 \
       --timeout 300 \
