@@ -14,6 +14,8 @@ The following diagram illustrates the architecture of the MCP server deployment:
 
 ![Architecture Diagram](architecture.png)
 
+Source: [https://github.com/aal80/simple-mcp-server-on-lambda](https://github.com/aal80/simple-mcp-server-on-lambda)
+
 The architecture consists of:
 1. **API Gateway**: Provides the HTTP API endpoint
 2. **Lambda Function**: Runs the containerized MCP server
@@ -234,4 +236,3 @@ This project was developed with the support of the following technologies and se
 - [Model Context Protocol](https://modelcontextprotocol.io/) for the communication protocol
 - [Node.js](https://nodejs.org/) and [TypeScript](https://www.typescriptlang.org/) for the implementation
 - [Express.js](https://expressjs.com/) for the web server framework
-
