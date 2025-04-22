@@ -1,15 +1,7 @@
 import express, { Request, Response } from 'express';
 import { randomUUID } from 'node:crypto';
-//import { McpServer } from '../../server/mcp.js';
-//import { McpServer } from '@modelcontextprotocol/sdk/server/mcp';
-
-// import { StreamableHTTPServerTransport } from '../../server/streamableHttp.js';
-//import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp'; 
 import { z } from 'zod';
-//import { CallToolResult, GetPromptResult, isInitializeRequest, ReadResourceResult } from '../../types.js';
-//import { CallToolResult, GetPromptResult, isInitializeRequest, ReadResourceResult } from '@modelcontextprotocol/sdk/types'; 
 
-//import { InMemoryEventStore } from '../shared/inMemoryEventStore.js';
 
 import { CloudWatchLogsClient, FilterLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs"; // Added import
 import serverlessExpress from '@codegenie/serverless-express';
@@ -25,21 +17,6 @@ const server = new McpServer({
   name: 'bedrock-usage-stats-http-server',
   version: '1.0.1',
 }, { capabilities: { logging: {} } });
-
-// Log the capability invocation details
-// server.onCapabilityChange((event) => {
-//   switch (event.action) {
-//     case 'invoked':
-//       console.log(`${event.capabilityType} invocation ${event.invocationIndex}: '${event.capabilityName}' started`);
-//       break;
-//     case 'completed':
-//       console.log(`${event.capabilityType} invocation ${event.invocationIndex}: '${event.capabilityName}' completed in ${event.durationMs}ms`);
-//       break;
-//     case 'error':
-//       console.log(`${event.capabilityType} invocation ${event.invocationIndex}: '${event.capabilityName}' failed in ${event.durationMs}ms: ${event.error}`);
-//       break;
-//   }
-// });
 
 // Register a simple tool that returns a greeting
 server.tool(
@@ -334,7 +311,7 @@ app.use(express.json());
 // TODO: Use a more efficient transport, like a Redis-based transport or maybe DynamoDB-based transport
 const transports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
-app.post('/mcp', async (req: Request, res: Response) => {
+app.post('/prod/mcp', async (req: Request, res: Response) => {
   console.log('Received MCP request:', req.body);
   try {
     // Check for existing session ID
@@ -405,7 +382,7 @@ app.post('/mcp', async (req: Request, res: Response) => {
 });
 
 // Handle GET requests for SSE streams (using built-in support from StreamableHTTP)
-app.get('/mcp', async (req: Request, res: Response) => {
+app.get('/prod/mcp', async (req: Request, res: Response) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   if (!sessionId || !transports[sessionId]) {
     res.status(400).send('Invalid or missing session ID');
@@ -425,7 +402,7 @@ app.get('/mcp', async (req: Request, res: Response) => {
 });
 
 // Handle DELETE requests for session termination (according to MCP spec)
-app.delete('/mcp', async (req: Request, res: Response) => {
+app.delete('/prod/mcp', async (req: Request, res: Response) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   if (!sessionId || !transports[sessionId]) {
     res.status(400).send('Invalid or missing session ID');

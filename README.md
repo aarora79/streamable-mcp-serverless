@@ -4,12 +4,59 @@ This project deploys a Model Context Protocol (MCP) server as a containerized ap
 
 ## Prerequisites
 
-1.  **AWS Account:** You need an active AWS account.
-2.  **AWS CLI:** Install and configure the AWS CLI with credentials that have permissions to manage ECR, Lambda, IAM, and CloudWatch Logs. ([Configuration Guide](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-quickstart.html))
-3.  **Docker:** Install Docker Desktop or Docker Engine. Ensure the Docker daemon is running.
-4.  **Python:** Install Python 3.x.
-5.  **Boto3:** Install the AWS SDK for Python: `pip install boto3`
-6.  **Node.js & npm:** Install Node.js (which includes npm) version 18.x or later. This is needed by the Docker build process.
+1.  **Node.js & npm:** Install Node.js version 18.x or later (which includes npm). This is required for running the server and client locally.
+2.  **Python 3.x:** Required for the deployment script (`deploy_mcp_lambda.py`).
+3.  **Docker:** Install Docker Desktop or Docker Engine. Required for building the container image for AWS Lambda deployment.
+4.  **AWS Account & CLI :** Only needed if you plan to deploy to AWS Lambda:
+    *   An active AWS account
+    *   AWS CLI installed and configured with appropriate credentials
+    *   Boto3 Python package: `pip install boto3`
+
+Note: For local development and testing, you only need Node.js and npm. The other prerequisites are only required if you plan to deploy to AWS Lambda.
+
+## Running Locally
+
+You can run both the server and client locally for development and testing purposes.
+
+### Running the Server Locally
+
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+
+2. Start the server:
+   ```bash
+   npx tsx src/server.ts
+   ```
+   The server will start on `http://localhost:3000` by default.
+
+### Running the Client Locally
+
+1. The client can be run using the same command:
+   ```bash
+   npx tsx src/client.ts
+   ```
+
+2. To test the client with the local server, you can use curl commands similar to the ones in the "Connecting to the Server" section, but replace the Function URL with `http://localhost:3000/mcp`.
+
+Example:
+```bash
+# Initialize
+curl -XPOST "http://localhost:3000/mcp" \
+-H "Content-Type: application/json" \
+-H "Accept: application/json" \
+-d '{
+  "jsonrpc": "2.0",
+  "method": "initialize",
+  "params": {
+    "clientInfo": { "name": "curl-client", "version": "1.0" },
+    "protocolVersion": "2025-03-26",
+    "capabilities": {}
+  },
+  "id": "init-1"
+}'
+```
 
 ## Deployment Approach
 
@@ -51,6 +98,75 @@ This project deploys a Model Context Protocol (MCP) server as a containerized ap
         *   **Lambda Function URL**
         *   **MCP Server Endpoint** (This is the Function URL with `/mcp` appended)
 
+## Deploying to API Gateway
+
+You can deploy the MCP server with API Gateway instead of using a Lambda Function URL. This provides additional features like API key authentication and usage plans.
+
+1. **Prerequisites:**
+   * Ensure you have the AWS CLI configured with appropriate permissions
+   * Have the required IAM roles and policies set up
+   * Have Docker installed and running
+
+2. **Deploy using the deployment script:**
+   ```bash
+   python deploy.py \
+     --function-name mcp-server-function \
+     --role-arn arn:aws:iam::<your-account-id>:role/mcp-lambda-execution-role \
+     --bedrock-role-arn arn:aws:iam::<your-account-id>:role/mcp-bedrock-role \
+     --region us-east-1 \
+     --memory 2048 \
+     --timeout 300 \
+     --api-gateway \
+     --api-name mcp-server-api \
+     --stage-name prod
+   ```
+
+   Parameters:
+   * `--function-name`: Name for your Lambda function
+   * `--role-arn`: ARN of the Lambda execution role
+   * `--bedrock-role-arn`: ARN of the role for invoking Bedrock models
+   * `--region`: AWS region to deploy to (default: us-east-1)
+   * `--memory`: Memory size in MB (default: 2048)
+   * `--timeout`: Timeout in seconds (default: 300)
+   * `--api-gateway`: Flag to enable API Gateway deployment
+   * `--api-name`: Name for the API Gateway (defaults to function-name-api)
+   * `--stage-name`: API Gateway stage name (default: prod)
+
+3. **After Deployment:**
+   The script will output:
+   * API Gateway URL
+   * API Key (if created)
+   * Usage instructions
+
+4. **Using the API:**
+   ```bash
+   # Initialize
+   curl -XPOST "https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp" \
+   -H "Content-Type: application/json" \
+   -H "Accept: application/json" \
+   -H "x-api-key: <your-api-key>" \
+   -d '{
+     "jsonrpc": "2.0",
+     "method": "initialize",
+     "params": {
+       "clientInfo": { "name": "curl-client", "version": "1.0" },
+       "protocolVersion": "2025-03-26",
+       "capabilities": {}
+     },
+     "id": "init-1"
+   }'
+   ```
+
+   Note: Replace `<api-id>`, `<region>`, and `<your-api-key>` with the values provided in the deployment output.
+
+5. **Features of API Gateway Deployment:**
+   * API key authentication
+   * Usage plans with quotas and throttling
+   * CORS configuration
+   * Custom domain names (can be configured in AWS Console)
+   * API documentation
+   * Monitoring and logging
+
 ## Connecting to the Server
 
 Use the **MCP Server Endpoint** URL provided in the deployment script's output summary.
@@ -73,7 +189,8 @@ Use the **MCP Server Endpoint** URL provided in the deployment script's output s
       "method": "initialize",
       "params": {
         "clientInfo": { "name": "curl-client", "version": "1.0" },
-        "protocolVersion": "2025-03-26"
+        "protocolVersion": "2025-03-26",
+        "capabilities": {}
       },
       "id": "init-1"
     }'

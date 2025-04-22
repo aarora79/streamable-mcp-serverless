@@ -1,7 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp';
-// import { Client } from '../typescript-sdk/src/client/index.js';
-// import { StreamableHTTPClientTransport } from '../typescript-sdk/src/client/streamableHttp.js';
 import { createInterface } from 'node:readline';
 import {
   ListToolsRequest,
@@ -16,7 +14,6 @@ import {
   ListResourcesResultSchema,
   LoggingMessageNotificationSchema,
   ResourceListChangedNotificationSchema,
-//} from '../typescript-sdk/src/types.js';
 } from '@modelcontextprotocol/sdk/types';
 
 // Create readline interface for user input
@@ -24,9 +21,6 @@ const readline = createInterface({
   input: process.stdin,
   output: process.stdout
 });
-
-
-
 
 // Track received notifications for debugging resumability
 let notificationCount = 0;
@@ -42,8 +36,6 @@ async function main(): Promise<void> {
   console.log('MCP Interactive Client');
   console.log('=====================');
 
-
-  
   // Connect to server immediately with default settings
   await connect();
 
@@ -54,7 +46,7 @@ async function main(): Promise<void> {
 
 function printHelp(): void {
   console.log('\nAvailable commands:');
-  console.log('  connect [url]              - Connect to MCP server (default: http://localhost:3000/mcp)');
+  console.log('  connect [url]              - Connect to MCP server (default: http://localhost:3000/prod/mcp)');
   console.log('  disconnect                 - Disconnect from server');
   console.log('  terminate-session          - Terminate the current session');
   console.log('  reconnect                  - Reconnect to the server');
@@ -62,13 +54,8 @@ function printHelp(): void {
   console.log('  call-tool <name> [args]    - Call a tool with optional JSON arguments');
   console.log('  greet [name]               - Call the greet tool');
   console.log('  multi-greet [name]         - Call the multi-greet tool with notifications');
-  console.log('  start-notifications [interval] [count] - Start periodic notifications');
-  console.log('  list-prompts               - List available prompts');
-  console.log('  get-prompt [name] [args]   - Get a prompt with optional JSON arguments');
   console.log('  list-resources             - List available resources');
-  console.log('  bedrock-stats <region> <log_group> <days> [account_id] - Get Bedrock usage stats');
-  console.log('  stats                      - Get default Bedrock daily usage stats (us-east-1, /aws/bedrock/modelinvocations, 1 day, streams results via notifications)');
-  console.log('  stats-report [region] [log_group] [days] [account_id] - Get Bedrock daily usage report (returns full report, defaults: us-east-1, /aws/bedrock/modelinvocations, 1 day)');
+  console.log('  bedrock-report [region] [log_group] [days] [account_id] - Get Bedrock daily usage report (returns full report, defaults: us-east-1, /aws/bedrock/modelinvocations, 1 day)');
   console.log('  help                       - Show this help');
   console.log('  quit                       - Exit the program');
   console.log('  notificationCount          - print notificationCount');
@@ -162,34 +149,7 @@ function commandLoop(): void {
           await listResources();
           break;
 
-        case 'bedrock-stats': {
-          if (args.length < 4) {
-            console.log('Usage: bedrock-stats <region> <log_group_name> <days> [aws_account_id]');
-          } else {
-            const region = args[1];
-            const logGroupName = args[2];
-            const days = parseInt(args[3], 10);
-            const awsAccountId = args[4];
-
-            if (isNaN(days) || days <= 0) {
-              console.log('Invalid number of days. Must be a positive integer.');
-            } else {
-              await callBedrockStatsTool(region, logGroupName, days, awsAccountId);
-            }
-          }
-          break;
-        }
-
-        case 'stats': {
-          const defaultRegion = 'us-east-1';
-          const defaultLogGroup = '/aws/bedrock/modelinvocations';
-          const defaultDays = 1;
-          console.log(`Running stats with defaults: region=${defaultRegion}, log_group=${defaultLogGroup}, days=${defaultDays}`);
-          await callBedrockStatsTool(defaultRegion, defaultLogGroup, defaultDays);
-          break;
-        }
-
-        case 'stats-report': {
+        case 'bedrock-report': {
           let region = 'us-east-1';
           let logGroupName = '/aws/bedrock/modelinvocations';
           let days = 1;
@@ -280,6 +240,7 @@ async function connect(url?: string): Promise<void> {
       console.error('\x1b[31mClient error:', error, '\x1b[0m');
     }
 
+    // Original commented out code for reference (can be removed)
     // transport = new StreamableHTTPClientTransport(
     //   new URL(serverUrl),
     //   {
