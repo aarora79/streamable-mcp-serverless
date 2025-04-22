@@ -14,7 +14,7 @@ The following diagram illustrates the architecture of the MCP server deployment:
 
 ![Architecture Diagram](architecture.png)
 
-Source: [https://github.com/aal80/simple-mcp-server-on-lambda](https://github.com/aal80/simple-mcp-server-on-lambda)
+*Image credit: [https://github.com/aal80/simple-mcp-server-on-lambda](https://github.com/aal80/simple-mcp-server-on-lambda)*
 
 The architecture consists of:
 1. **API Gateway**: Provides the HTTP API endpoint
