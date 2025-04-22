@@ -28,7 +28,7 @@ let notificationCount = 0;
 // Global client and transport for interactive commands
 let client: Client | null = null;
 let transport: StreamableHTTPClientTransport | null = null;
-let serverUrl = 'http://localhost:3000/prod/mcp';
+let serverUrl = process.env.MCP_SERVER_URL || 'http://localhost:3000/prod/mcp';
 let notificationsToolLastEventId: string | undefined = undefined;
 let sessionId: string | undefined = undefined;
 
@@ -190,7 +190,7 @@ function commandLoop(): void {
             toolArgs.aws_account_id = awsAccountId;
           }
 
-          await callTool('get_bedrock_report', toolArgs);
+          await callTool('get_bedrock_usage_report', toolArgs);
           break;
         }
 

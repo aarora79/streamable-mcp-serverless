@@ -99,8 +99,6 @@ server.prompt(
   }
 );
 
-////////////////
-
 // --- Bedrock Logs Tool ---
 
 // Assume getAwsServiceClient is defined elsewhere or add its definition if needed
@@ -285,7 +283,6 @@ server.tool(
     }
 );
 
-////////////////
 
 // Create a simple resource at a fixed URI
 server.resource(
