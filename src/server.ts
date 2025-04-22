@@ -31,7 +31,26 @@ interface TransportMap { // Define the type for clarity
 const transports: TransportMap = {};
 
 // Handle POST requests for client-to-server communication
-app.post('/mcp', async (req, res) => {
+app.post('/prod/mcp', async (req, res) => {
+    // Add trace statements to print headers and payload in a formatted way
+    const headers = req.headers;
+    const payload = req.body;
+    l.debug(`Incoming request headers:\n${JSON.stringify(headers, null, 2)}`);
+    l.debug(`Incoming request payload:\n${JSON.stringify(payload, null, 2)}`);
+
+    // Log transports with their session IDs
+    l.debug('Current transports:', 
+        Object.entries(transports).map(([sessionId, transport]) => {
+        return {
+            sessionId,
+            transport: {
+            id: transport.sessionId
+            // Add other important properties you want to see
+            // but exclude any circular references or large objects
+            }
+        };
+        })
+    );
     const sessionId = req.headers['mcp-session-id'] as string; // Type assertion
     let transport: StreamableHTTPServerTransport; // Type annotation
 
@@ -52,6 +71,8 @@ app.post('/mcp', async (req, res) => {
                 l.debug(`transport.onsessioninitialized sessionId=${newSessionId}`);
                 transports[newSessionId] = transport; // Use the correct newSessionId
             }
+
+
         });
 
         await mcpServer.connect(transport);
@@ -72,7 +93,57 @@ app.post('/mcp', async (req, res) => {
 
     // Pass the already parsed body (by express.json)
     await transport.handleRequest(req, res, req.body); 
+
+    //await sendMessages(transport);
+    
 });
+
+async function sendMessages(transport: StreamableHTTPServerTransport) {
+    try {
+        await transport.send({
+            jsonrpc: "2.0",
+            method: "sse/connection",
+            params: { message: "Stream started" }
+        })
+        console.log("Stream started")
+
+        let messageCount = 0
+        const interval = setInterval(async () => {
+
+        messageCount++
+
+        const message = `Message ${messageCount} at ${new Date().toISOString()}`
+
+        try {
+            await transport.send({
+                jsonrpc: "2.0",
+                method: "sse/message",
+                params: { data: message }
+            })
+
+          console.log(`Sent: ${message}`)
+
+            if (messageCount === 2) {
+                clearInterval(interval)
+                await transport.send({
+                    jsonrpc: "2.0",
+                    method: "sse/complete",
+                    params: { message: "Stream completed" }
+                })
+                console.log("Stream completed")
+            }
+
+        } catch (error) {
+          console.error("Error sending message:", error)
+          clearInterval(interval)
+        }
+
+      }, 1000)
+
+    } catch (error) {
+      console.error("Error in startSending:", error)
+    }
+}
 
 // Add type annotation for body parameter
 function isInitializeRequest(body: any): boolean {
@@ -93,25 +164,27 @@ function isInitializeRequest(body: any): boolean {
 }
 
 // Handle GET requests (Blocked as per user code)
-app.get('/mcp', (req, res) => {
+app.get('/prod/mcp', (req, res) => {
     l.warn('GET /mcp called but not implemented in this version.');
     res.status(405).set('Allow', 'POST, DELETE').send('Method Not Allowed');
 });
 
 // Handle DELETE requests for session termination
 // Keep simplified version from user code for now
-app.delete('/mcp', (req, res) => {
+app.delete('/prod/mcp', (req, res) => {
     // Note: This doesn't actually delete the session state in this version
     l.warn('DELETE /mcp called but session cleanup not fully implemented here.');
     res.status(405).set('Allow', 'POST').send('Method Not Allowed'); 
 });
 
 // --- Remove local app.listen block --- 
-// const port = 3000;
-// app.listen(port, () => {
-//     l.debug(`Listening on http://localhost:${port}`);
-// });
+const port = 3000;
+app.listen(port, () => {
+    l.debug(`Listening on http://localhost:${port}`);
+}).on('error', (err) => {
+    console.error('Failed to start server:', err);
+});
 
 // --- Add back serverless-express --- 
-import serverlessExpress from '@codegenie/serverless-express';
-export const handler = serverlessExpress({ app });
+// import serverlessExpress from '@codegenie/serverless-express';
+// export const handler = serverlessExpress({ app });

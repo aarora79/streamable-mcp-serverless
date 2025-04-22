@@ -1,5 +1,7 @@
 import { Client } from '@modelcontextprotocol/sdk/client';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp';
+// import { Client } from '../typescript-sdk/src/client/index.js';
+// import { StreamableHTTPClientTransport } from '../typescript-sdk/src/client/streamableHttp.js';
 import { createInterface } from 'node:readline';
 import {
   ListToolsRequest,
@@ -14,6 +16,7 @@ import {
   ListResourcesResultSchema,
   LoggingMessageNotificationSchema,
   ResourceListChangedNotificationSchema,
+//} from '../typescript-sdk/src/types.js';
 } from '@modelcontextprotocol/sdk/types';
 
 // Create readline interface for user input
@@ -22,13 +25,16 @@ const readline = createInterface({
   output: process.stdout
 });
 
+
+
+
 // Track received notifications for debugging resumability
 let notificationCount = 0;
 
 // Global client and transport for interactive commands
 let client: Client | null = null;
 let transport: StreamableHTTPClientTransport | null = null;
-let serverUrl = 'http://localhost:3000/mcp';
+let serverUrl = 'http://localhost:3000/prod/mcp';
 let notificationsToolLastEventId: string | undefined = undefined;
 let sessionId: string | undefined = undefined;
 
@@ -36,6 +42,8 @@ async function main(): Promise<void> {
   console.log('MCP Interactive Client');
   console.log('=====================');
 
+
+  
   // Connect to server immediately with default settings
   await connect();
 
@@ -63,6 +71,8 @@ function printHelp(): void {
   console.log('  stats-report [region] [log_group] [days] [account_id] - Get Bedrock daily usage report (returns full report, defaults: us-east-1, /aws/bedrock/modelinvocations, 1 day)');
   console.log('  help                       - Show this help');
   console.log('  quit                       - Exit the program');
+  console.log('  notificationCount          - print notificationCount');
+  
 }
 
 function commandLoop(): void {
@@ -72,6 +82,9 @@ function commandLoop(): void {
 
     try {
       switch (command) {
+        case 'notificationcount':
+          console.log('Notification count:', notificationCount);
+          break;
         case 'connect':
           await connect(args[1]);
           break;
@@ -260,17 +273,29 @@ async function connect(url?: string): Promise<void> {
   try {
     // Create a new client
     client = new Client({
-      name: 'example-client',
+      name: 'understand-bedrock-spend-mcp-client',
       version: '1.0.0'
     });
     client.onerror = (error) => {
       console.error('\x1b[31mClient error:', error, '\x1b[0m');
     }
 
+    // transport = new StreamableHTTPClientTransport(
+    //   new URL(serverUrl),
+    //   {
+    //     sessionId: sessionId
+    //   }
+    // );
+
     transport = new StreamableHTTPClientTransport(
       new URL(serverUrl),
       {
-        sessionId: sessionId
+        sessionId: sessionId,
+        debug: true, // Enable debug logging if available in the SDK
+        onnotification: (rawNotification) => {
+          // Log all incoming notifications before schema matching
+          console.log('RAW NOTIFICATION RECEIVED:', JSON.stringify(rawNotification, null, 2));
+        }
       }
     );
 
