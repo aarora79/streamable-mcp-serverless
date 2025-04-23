@@ -24,7 +24,7 @@ The Model Context Protocol (MCP) is an open standard for communication between A
 
 ## Why this architecture matters
 
-This pattern solves a critical challenge: As of April 2025, Lambda supports HTTP Streaming for Node.js, but API Gateway doesn't support Server-Sent Events (SSE). The Streamable HTTP enhancement bridges this gap, enabling robust MCP server deployments in serverless environments.
+This pattern solves a critical challenge: As of April 2025, Lambda supports response streaming for Node.js 18, this combined with the fact that MCP protocol now supports Streamable HTTP enables robust MCP server deployments in serverless environments (without requiring Service Side Events (SSE) support in the API Gateway).
 
 The architecture provides:
 - Cost-effective serverless scaling
