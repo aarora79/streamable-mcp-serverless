@@ -209,14 +209,14 @@ def deploy_authorizer_lambda(function_name, role_arn, region, runtime='python3.1
     finally:
         print("Authorizer Lambda deployment process completed.")
 
-def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role_arn, region="us-east-1", memory_size=1024, timeout=90, api_gateway=False, api_name=None, stage_name="prod", authorizer_function_name=None):
+def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role_arn, region="us-east-1", memory_size=1024, timeout=90, api_gateway=False, api_name=None, stage_name="prod", enable_authorizer=False, authorizer_function_name=None):
     """
-    Deploy a container from ECR as a Lambda function with optional API Gateway and Authorizer Lambda.
+    Deploy a container from ECR as a Lambda function with optional API Gateway and optional Authorizer Lambda.
     
     Args:
         ecr_image_uri (str): URI of the ECR image to deploy
         function_name (str): Name of the main Lambda function
-        role_arn (str): ARN of the Lambda execution role (used for both main and authorizer)
+        role_arn (str): ARN of the Lambda execution role (used for both main and optionally authorizer)
         bedrock_role_arn (str): ARN of the role to use when invoking Bedrock models
         region (str): AWS region to deploy the Lambda function
         memory_size (int): Memory size in MB for the main Lambda function
@@ -224,7 +224,8 @@ def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role
         api_gateway (bool): Whether to create an API Gateway for the Lambda
         api_name (str): Name for the API Gateway (defaults to function-name-api)
         stage_name (str): API Gateway stage name
-        authorizer_function_name (str, optional): Name for the authorizer Lambda function (required if api_gateway is True)
+        enable_authorizer (bool): Whether to deploy and enable the Lambda authorizer.
+        authorizer_function_name (str, optional): Name for the authorizer Lambda function (required if enable_authorizer is True)
     """
     print("=" * 80)
     print(f"Deploying Main Container Lambda function {function_name} in region {region}...")
@@ -328,19 +329,24 @@ def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role
             print(f"Main Function ARN: {function_arn}")
             
             if api_gateway:
-                # Validate authorizer name is provided if API Gateway is enabled
-                if not authorizer_function_name:
-                    print("Error: --authorizer-function-name is required when --api-gateway is specified.")
-                    return False
-                
-                # Deploy the authorizer Lambda first
-                authorizer_lambda_arn = deploy_authorizer_lambda(authorizer_function_name, role_arn, region)
-                if not authorizer_lambda_arn:
-                    print("Error: Failed to deploy the authorizer Lambda function. Aborting API Gateway deployment.")
-                    return False
-                
-                # Setup API Gateway with the deployed authorizer
-                return deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_arn, api_name, stage_name)
+                authorizer_lambda_arn_to_pass = None
+                # If authorizer is enabled, deploy it first
+                if enable_authorizer:
+                    # Validate authorizer name is provided if authorizer is enabled
+                    if not authorizer_function_name:
+                        print("Error: --authorizer-function-name is required when --enable-authorizer is specified.")
+                        return False
+                    
+                    print("Authorizer enabled. Deploying authorizer Lambda...")
+                    authorizer_lambda_arn_to_pass = deploy_authorizer_lambda(authorizer_function_name, role_arn, region)
+                    if not authorizer_lambda_arn_to_pass:
+                        print("Error: Failed to deploy the authorizer Lambda function. Aborting API Gateway deployment.")
+                        return False
+                else:
+                    print("Authorizer not enabled. Skipping authorizer deployment.")
+
+                # Setup API Gateway, passing authorizer ARN only if it was deployed
+                return deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_arn=authorizer_lambda_arn_to_pass, api_name=api_name, stage_name=stage_name)
             else:
                 print("No API Gateway requested. Lambda deployment complete.")
                 return True
@@ -354,15 +360,15 @@ def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role
     finally:
         print("Lambda deployment process completed.")
             
-def deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_arn, api_name=None, stage_name="prod"):
+def deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_arn=None, api_name=None, stage_name="prod"):
     """
-    Deploy an API Gateway v2 HTTP API with Lambda integration and a Lambda authorizer.
+    Deploy an API Gateway v2 HTTP API with Lambda integration and optional Lambda authorizer.
     
     Args:
         function_name (str): The backend Lambda function name
         function_arn (str): The backend Lambda function ARN
         region (str): AWS region
-        authorizer_lambda_arn (str): ARN of the Lambda authorizer function
+        authorizer_lambda_arn (str, optional): ARN of the Lambda authorizer function. If provided, enables authorization.
         api_name (str): Name for the API Gateway
         stage_name (str): API Gateway stage name
     
@@ -372,8 +378,10 @@ def deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_ar
     if api_name is None:
         api_name = f"{function_name}-api"
     
+    enable_authorization = bool(authorizer_lambda_arn) # Determine if auth is enabled
+    auth_status_message = "with" if enable_authorization else "without"
     print("=" * 80)
-    print(f"Deploying API Gateway ({api_name}) with Lambda Authorizer for: {function_name}")
+    print(f"Deploying API Gateway ({api_name}) {auth_status_message} Lambda Authorizer for: {function_name}")
     print("=" * 80)
     
     # Initialize clients
@@ -417,79 +425,84 @@ def deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_ar
                 print(f"Error creating API Gateway: {str(e)}")
                 return False
         
-        # Step 2: Create or update the Lambda Authorizer
-        authorizer_name = 'auth-lambda'
+        # Step 2: Create or update the Lambda Authorizer (only if enabled)
         authorizer_id = None
-        authorizer_uri = f"arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/{authorizer_lambda_arn}/invocations"
+        if enable_authorization:
+            authorizer_name = 'auth-lambda' # Hardcoded name for the authorizer resource in API Gateway
+            authorizer_uri = f"arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/{authorizer_lambda_arn}/invocations"
+            print(f"Enabling authorization using authorizer Lambda: {authorizer_lambda_arn}")
 
-        try:
-            # Check if authorizer already exists
-            response = apigateway_client.get_authorizers(ApiId=api_id)
-            for auth in response.get('Items', []):
-                if auth['Name'] == authorizer_name:
-                    authorizer_id = auth['AuthorizerId']
-                    print(f"Found existing authorizer: {authorizer_id}")
-                    apigateway_client.update_authorizer(
+            try:
+                # Check if authorizer already exists
+                response = apigateway_client.get_authorizers(ApiId=api_id)
+                for auth in response.get('Items', []):
+                    if auth['Name'] == authorizer_name:
+                        authorizer_id = auth['AuthorizerId']
+                        print(f"Found existing authorizer: {authorizer_id}")
+                        # Update the existing authorizer (ensure settings match)
+                        apigateway_client.update_authorizer(
+                            ApiId=api_id,
+                            AuthorizerId=authorizer_id,
+                            Name=authorizer_name,
+                            AuthorizerType='REQUEST',
+                            AuthorizerUri=authorizer_uri,
+                            IdentitySource=['$request.header.Authorization'],
+                            AuthorizerPayloadFormatVersion='2.0',
+                            EnableSimpleResponses=True, 
+                            AuthorizerResultTtlInSeconds=300 # Cache for 5 mins
+                        )
+                        print(f"Updated existing authorizer {authorizer_id}")
+                        break
+
+                if not authorizer_id:
+                    # Create new authorizer
+                    response = apigateway_client.create_authorizer(
                         ApiId=api_id,
-                        AuthorizerId=authorizer_id,
                         Name=authorizer_name,
                         AuthorizerType='REQUEST',
                         AuthorizerUri=authorizer_uri,
                         IdentitySource=['$request.header.Authorization'],
                         AuthorizerPayloadFormatVersion='2.0',
-                        EnableSimpleResponses=True,
-                        AuthorizerResultTtlInSeconds=300
+                        EnableSimpleResponses=True, 
+                        AuthorizerResultTtlInSeconds=300 # Cache for 5 mins
                     )
-                    print(f"Updated existing authorizer {authorizer_id}")
-                    break
+                    authorizer_id = response['AuthorizerId']
+                    print(f"Created new Lambda authorizer: {authorizer_id}")
 
-            if not authorizer_id:
-                # Create new authorizer
-                response = apigateway_client.create_authorizer(
-                    ApiId=api_id,
-                    Name=authorizer_name,
-                    AuthorizerType='REQUEST',
-                    AuthorizerUri=authorizer_uri,
-                    IdentitySource=['$request.header.Authorization'],
-                    AuthorizerPayloadFormatVersion='2.0',
-                    EnableSimpleResponses=True,
-                    AuthorizerResultTtlInSeconds=300
-                )
-                authorizer_id = response['AuthorizerId']
-                print(f"Created new Lambda authorizer: {authorizer_id}")
-
-        except Exception as e:
-            print(f"Error creating/updating Lambda authorizer: {str(e)}")
-            return False
-
-        # Step 2b: Add permission for API Gateway to invoke the *authorizer* Lambda
-        try:
-            authorizer_source_arn = f"arn:aws:execute-api:{region}:{account_id}:{api_id}/authorizers/{authorizer_id}"
-            statement_id_auth = f'apigateway-invoke-authorizer-{api_id}'
-
-            try:
-                 # Check if permission exists for the authorizer
-                 lambda_client.remove_permission(
-                     FunctionName=authorizer_lambda_arn,
-                     StatementId=statement_id_auth,
-                 )
-                 print(f"Removed existing invoke permission for authorizer {authorizer_lambda_arn} (StatementId: {statement_id_auth})")
-            except lambda_client.exceptions.ResourceNotFoundException:
-                 print(f"No existing invoke permission found for authorizer {authorizer_lambda_arn} (StatementId: {statement_id_auth}), proceeding to add.")
             except Exception as e:
-                 print(f"Warning: Could not remove potentially existing permission for authorizer {authorizer_lambda_arn} (StatementId: {statement_id_auth}): {e}")
-            
-            lambda_client.add_permission(
-                 FunctionName=authorizer_lambda_arn,
-                 StatementId=statement_id_auth,
-                 Action='lambda:InvokeFunction',
-                 Principal='apigateway.amazonaws.com',
-                 SourceArn=authorizer_source_arn
-            )
-            print(f"Added invoke permission for API Gateway to authorizer Lambda: {authorizer_lambda_arn}")
-        except Exception as e:
-            print(f"Error setting invoke permission for authorizer Lambda: {str(e)}")
-            return False
+                print(f"Error creating/updating Lambda authorizer: {str(e)}")
+                return False
+
+            # Step 2b: Add permission for API Gateway to invoke the *authorizer* Lambda
+            try:
+                authorizer_source_arn = f"arn:aws:execute-api:{region}:{account_id}:{api_id}/authorizers/{authorizer_id}"
+                statement_id_auth = f'apigateway-invoke-authorizer-{api_id}'
+
+                try:
+                    # Remove potentially existing permission first
+                    lambda_client.remove_permission(
+                        FunctionName=authorizer_lambda_arn,
+                        StatementId=statement_id_auth,
+                    )
+                    print(f"Removed existing invoke permission for authorizer {authorizer_lambda_arn} (StatementId: {statement_id_auth})")
+                except lambda_client.exceptions.ResourceNotFoundException:
+                    print(f"No existing invoke permission found for authorizer {authorizer_lambda_arn} (StatementId: {statement_id_auth}), proceeding to add.")
+                except Exception as e:
+                    print(f"Warning: Could not remove potentially existing permission for authorizer {authorizer_lambda_arn} (StatementId: {statement_id_auth}): {e}")
+                
+                lambda_client.add_permission(
+                    FunctionName=authorizer_lambda_arn,
+                    StatementId=statement_id_auth,
+                    Action='lambda:InvokeFunction',
+                    Principal='apigateway.amazonaws.com',
+                    SourceArn=authorizer_source_arn
+                )
+                print(f"Added invoke permission for API Gateway to authorizer Lambda: {authorizer_lambda_arn}")
+            except Exception as e:
+                print(f"Error setting invoke permission for authorizer Lambda: {str(e)}")
+                return False
+        else:
+            print("Authorization not enabled. Skipping authorizer setup.")
 
         # Step 3: Create or update integration with backend Lambda
         integration_id = None
@@ -519,16 +532,23 @@ def deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_ar
             print(f"Error setting up Lambda integration: {str(e)}")
             return False
             
-        # Step 4: Create or update routes for the API, now using the authorizer
+        # Step 4: Create or update routes for the API, applying authorization if enabled
         # Define the specific routes to configure
         route_keys_to_ensure = {
-            'GET /': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id},
-            'GET /docs': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id},
-            'GET /{proxy+}': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id},
-            'POST /{proxy+}': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id}
-            # '$default': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id} # Removed default route
+            'GET /': {},
+            'GET /docs': {},
+            'GET /{proxy+}': {},
+            'POST /{proxy+}': {}
+            # '$default': {} # Removed default route
         }
         
+        # Determine authorization settings for routes
+        auth_config = {
+            'AuthorizationType': 'CUSTOM' if enable_authorization else 'NONE'
+        }
+        if enable_authorization:
+            auth_config['AuthorizerId'] = authorizer_id
+
         # Get existing routes
         existing_routes = {}
         try:
@@ -550,8 +570,7 @@ def deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_ar
                         RouteId=route_id,
                         RouteKey=route_key,
                         Target=target,
-                        AuthorizationType=config['AuthorizationType'],
-                        AuthorizerId=config['AuthorizerId']
+                        **auth_config # Apply CUSTOM/NONE + AuthorizerId if applicable
                     )
                 else:
                      print(f"Creating route: {route_key}")
@@ -559,8 +578,7 @@ def deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_ar
                          ApiId=api_id,
                          RouteKey=route_key,
                          Target=target,
-                         AuthorizationType=config['AuthorizationType'],
-                         AuthorizerId=config['AuthorizerId']
+                        **auth_config # Apply CUSTOM/NONE + AuthorizerId if applicable
                      )
                      print(f"Created route: {route_key} (ID: {response['RouteId']})")
             except Exception as e:
@@ -624,13 +642,17 @@ def deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_ar
         # Print the API URL
         api_url = f"https://{api_id}.execute-api.{region}.amazonaws.com/{stage_name}"
         print("\n" + "=" * 80)
-        print(f"API Gateway with Lambda Authorizer successfully deployed!")
+        print(f"API Gateway {auth_status_message} Lambda Authorizer successfully deployed!")
         print(f"API URL: {api_url}")
-        print(f"Authorizer Lambda ARN: {authorizer_lambda_arn}")
+        if enable_authorization:
+            print(f"Authorizer Lambda ARN: {authorizer_lambda_arn}")
         print(f"Backend Lambda ARN: {function_arn}")
-        print(f"\nEnsure requests include the 'Authorization' header for the authorizer.")
-        print(f"Example using curl (replace YOUR_TOKEN):")
-        print(f"curl -H 'Authorization: Bearer YOUR_TOKEN' {api_url}/some/path")
+        if enable_authorization:
+            print(f"\nEnsure requests include the 'Authorization' header for the authorizer.")
+            print(f"Example using curl (replace YOUR_TOKEN):")
+            print(f"curl -H 'Authorization: Bearer YOUR_TOKEN' {api_url}/some/path")
+        else:
+            print("\nAuthorization is not enabled for this API.")
         print("=" * 80)
             
         return True
@@ -651,13 +673,14 @@ def main():
     parser.add_argument('--api-gateway', action='store_true', help='Create an API Gateway with API key authentication')
     parser.add_argument('--api-name', help='Name for the API Gateway (defaults to function-name-api)')
     parser.add_argument('--stage-name', default='prod', help='API Gateway stage name (default: prod)')
-    parser.add_argument('--authorizer-function-name', help='Name for the Lambda authorizer function (required if --api-gateway is set)')
+    parser.add_argument('--enable-authorizer', action='store_true', help='Deploy and enable the Lambda authorizer from src/auth/auth.py')
+    parser.add_argument('--authorizer-function-name', help='Name for the Lambda authorizer function (required if --enable-authorizer is set)')
     
     args = parser.parse_args()
     
-    # Validate authorizer name if API Gateway is requested
-    if args.api_gateway and not args.authorizer_function_name:
-        parser.error("--authorizer-function-name is required when --api-gateway is specified.")
+    # Validate authorizer name only if authorizer is enabled
+    if args.enable_authorizer and not args.authorizer_function_name:
+        parser.error("--authorizer-function-name is required when --enable-authorizer is specified.")
     
     # Determine if we need to build and push a container or use the provided URI
     ecr_image_uri = args.image_uri
@@ -683,6 +706,7 @@ def main():
         args.api_gateway,
         args.api_name,
         args.stage_name,
+        args.enable_authorizer,
         args.authorizer_function_name
     )
     
