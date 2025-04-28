@@ -155,6 +155,55 @@ The server implements the following tools:
       API URL: https://<api-id>.execute-api.us-east-1.amazonaws.com/prod
       ```
 
+## Authorization
+
+This deployment supports optional Lambda-based request authorization for the API Gateway.
+
+### How it Works
+
+1.  **Authorizer Lambda:** A separate Python Lambda function (`src/auth/auth.py`) is deployed alongside the main MCP server Lambda.
+2.  **API Gateway Configuration:** When authorization is enabled during deployment, the API Gateway routes are configured to first trigger this authorizer Lambda for incoming requests.
+3.  **Token Check:** The authorizer Lambda expects an `Authorization` header in the format `Bearer <token>` (e.g., `Authorization: Bearer MyTestToken`). It extracts the token part (currently, it accepts *any* token following the `Bearer` prefix due to placeholder validation logic).
+4.  **Allow/Deny:** If the header is present and correctly formatted, the authorizer returns an "Allow" response to API Gateway. Otherwise, it returns "Deny".
+5.  **Backend Invocation:** If allowed, API Gateway proceeds to invoke the main MCP server Lambda (`bedrock` in the example below). If denied, API Gateway returns a `{"message":"Forbidden"}` response directly to the client.
+
+### Enabling Authorization During Deployment
+
+To deploy the API Gateway with the Lambda authorizer enabled, use the `--enable-authorizer` flag and provide a name for the authorizer function using `--authorizer-function-name`:
+
+```bash
+python deploy.py \
+  --function-name bedrock \
+  --role-arn <your-lambda-execution-role-arn> \
+  --api-gateway \
+  --enable-authorizer \
+  --authorizer-function-name my-api \
+  # Add other options like --region, --image-uri etc. as needed
+```
+
+This command will:
+* Deploy the main containerized Lambda (`bedrock`).
+* Deploy the authorizer Lambda (`my-api`) from `src/auth/auth.py`.
+* Configure the API Gateway (`bedrock-api`) to use `my-api` as the authorizer for all routes.
+
+### Example Authorized Request
+
+Use the `Authorization: Bearer <your-token>` header when making requests:
+
+```bash
+# Replace <api-id> and <region> with your deployment output
+# Replace MyTestToken with your actual token if you implement real validation
+API_URL="https://li8mz4qlzc.execute-api.us-east-1.amazonaws.com/prod/mcp" # Example URL
+
+curl -XPOST "$API_URL" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Authorization: Bearer MyTestToken" \
+  -d '{"jsonrpc": "2.0","method": "initialize","params": {"clientInfo": { "name": "curl-client", "version": "1.0" },"protocolVersion": "2025-03-26","capabilities": {}},"id": "init-1"}' | cat
+```
+
+If authorization is *not* enabled during deployment, you can omit the `-H "Authorization: Bearer MyTestToken"` header.
+
 ## Connecting to the Server
 
 After deployment, you can connect to the server using the `client.ts` script:
