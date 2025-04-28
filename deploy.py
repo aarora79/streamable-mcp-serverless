@@ -8,6 +8,8 @@ import os
 import random
 import json
 import uuid
+import zipfile
+import io
 
 def wait_for_function_update_completion(lambda_client, function_name):
     """
@@ -40,8 +42,16 @@ def wait_for_function_update_completion(lambda_client, function_name):
             time.sleep(2)
             
         except Exception as e:
-            print(f"Error checking function status: {str(e)}")
-            time.sleep(2)
+            # Specific check for ThrottlingException to avoid unnecessary retries
+            if hasattr(e, 'response') and e.response.get('Error', {}).get('Code') == 'ThrottlingException':
+                print(f"Throttling exception encountered: {str(e)}. Waiting before retry...")
+                time.sleep(5 + random.random()) # Wait a bit longer for throttling
+            elif isinstance(e, lambda_client.exceptions.ResourceNotFoundException):
+                 print(f"Function {function_name} not found during status check.")
+                 return False # Function doesn't exist, can't complete update
+            else:
+                print(f"Error checking function status: {str(e)}")
+                time.sleep(2) # General retry delay
     
     print(f"Timed out waiting for function update to complete")
     return False
@@ -99,24 +109,125 @@ def build_and_push_container():
         print(f"Error during build and push process: {str(e)}")
         return None
 
-def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role_arn, region="us-east-1", memory_size=1024, timeout=90, api_gateway=False, api_name=None, stage_name="prod"):
+def deploy_authorizer_lambda(function_name, role_arn, region, runtime='python3.11', memory_size=128, timeout=30):
     """
-    Deploy a container from ECR as a Lambda function with optional API Gateway
+    Deploy the Python authorizer Lambda function from src/auth/auth.py.
+    
+    Args:
+        function_name (str): Name for the authorizer Lambda function.
+        role_arn (str): ARN of the execution role (used for both Lambdas).
+        region (str): AWS region.
+        runtime (str): Python runtime version.
+        memory_size (int): Memory in MB.
+        timeout (int): Timeout in seconds.
+
+    Returns:
+        str: The ARN of the deployed authorizer Lambda function, or None on failure.
+    """
+    print("=" * 80)
+    print(f"Deploying Authorizer Lambda function: {function_name}...")
+    print("=" * 80)
+
+    lambda_client = boto3.client('lambda', region_name=region)
+    authorizer_code_path = 'src/auth/auth.py'
+    handler_name = 'auth.lambda_handler' # Assuming filename is auth.py and handler is lambda_handler
+
+    if not os.path.exists(authorizer_code_path):
+        print(f"Error: Authorizer code file not found at {authorizer_code_path}")
+        return None
+
+    try:
+        # Create zip file in memory
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Add the auth.py file to the root of the zip archive
+            zipf.write(authorizer_code_path, arcname=os.path.basename(authorizer_code_path))
+        zip_content = zip_buffer.getvalue()
+
+        function_exists = False
+        function_arn = None
+        try:
+            response = lambda_client.get_function(FunctionName=function_name)
+            function_exists = True
+            function_arn = response['Configuration']['FunctionArn']
+            print(f"Authorizer function {function_name} already exists. Updating...")
+        except lambda_client.exceptions.ResourceNotFoundException:
+            print(f"Authorizer function {function_name} does not exist. Creating...")
+
+        if function_exists:
+            # Update function code
+            print("Updating authorizer function code...")
+            response = lambda_client.update_function_code(
+                FunctionName=function_name,
+                ZipFile=zip_content,
+                Publish=True
+            )
+            function_arn = response['FunctionArn'] # Update ARN potentially if versioning
+            print("Waiting for authorizer code update to complete...")
+            wait_for_function_update_completion(lambda_client, function_name)
+            
+            # Update function configuration
+            print("Updating authorizer function configuration...")
+            lambda_client.update_function_configuration(
+                FunctionName=function_name,
+                Role=role_arn,
+                Handler=handler_name,
+                Runtime=runtime,
+                Timeout=timeout,
+                MemorySize=memory_size
+            )
+            print("Waiting for authorizer configuration update to complete...")
+            wait_for_function_update_completion(lambda_client, function_name)
+            print(f"Authorizer function {function_name} updated successfully.")
+
+        else:
+            # Create new function
+            print("Creating new authorizer function...")
+            response = lambda_client.create_function(
+                FunctionName=function_name,
+                Runtime=runtime,
+                Role=role_arn,
+                Handler=handler_name,
+                Code={'ZipFile': zip_content},
+                Timeout=timeout,
+                MemorySize=memory_size,
+                Publish=True
+            )
+            function_arn = response['FunctionArn']
+            print(f"Authorizer function {function_name} created successfully.")
+
+        # Wait for the function to become active after create/update
+        print("Waiting for authorizer function to become Active...")
+        waiter = lambda_client.get_waiter('function_active_v2')
+        waiter.wait(FunctionName=function_name)
+        print(f"Authorizer function {function_name} is Active. ARN: {function_arn}")
+        return function_arn
+
+    except Exception as e:
+        print(f"Error deploying authorizer Lambda function {function_name}: {str(e)}")
+        return None
+    finally:
+        print("Authorizer Lambda deployment process completed.")
+
+def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role_arn, region="us-east-1", memory_size=1024, timeout=90, api_gateway=False, api_name=None, stage_name="prod", authorizer_function_name=None):
+    """
+    Deploy a container from ECR as a Lambda function with optional API Gateway and Authorizer Lambda.
     
     Args:
         ecr_image_uri (str): URI of the ECR image to deploy
-        function_name (str): Name of the Lambda function
-        role_arn (str): ARN of the Lambda execution role
+        function_name (str): Name of the main Lambda function
+        role_arn (str): ARN of the Lambda execution role (used for both main and authorizer)
         bedrock_role_arn (str): ARN of the role to use when invoking Bedrock models
         region (str): AWS region to deploy the Lambda function
-        memory_size (int): Memory size in MB for the Lambda function
-        timeout (int): Timeout in seconds for the Lambda function
+        memory_size (int): Memory size in MB for the main Lambda function
+        timeout (int): Timeout in seconds for the main Lambda function
         api_gateway (bool): Whether to create an API Gateway for the Lambda
         api_name (str): Name for the API Gateway (defaults to function-name-api)
         stage_name (str): API Gateway stage name
+        authorizer_function_name (str, optional): Name for the authorizer Lambda function (required if api_gateway is True)
     """
     print("=" * 80)
-    print(f"Deploying container {ecr_image_uri} as Lambda function {function_name} in region {region}...")
+    print(f"Deploying Main Container Lambda function {function_name} in region {region}...")
     print("=" * 80)
     
     # Initialize the Lambda client with specified region
@@ -212,13 +323,24 @@ def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role
             print(f"Current state: {function_state}")
         
         if function_state == "Active":
-            print(f"Successfully deployed Lambda function: {function_name}")
+            print(f"Successfully deployed main Lambda function: {function_name}")
             function_arn = function_info['Configuration']['FunctionArn']
-            print(f"Function ARN: {function_arn}")
+            print(f"Main Function ARN: {function_arn}")
             
             if api_gateway:
-                # Setup API Gateway instead of Function URL
-                return deploy_api_gateway(function_name, function_arn, region, api_name, stage_name)
+                # Validate authorizer name is provided if API Gateway is enabled
+                if not authorizer_function_name:
+                    print("Error: --authorizer-function-name is required when --api-gateway is specified.")
+                    return False
+                
+                # Deploy the authorizer Lambda first
+                authorizer_lambda_arn = deploy_authorizer_lambda(authorizer_function_name, role_arn, region)
+                if not authorizer_lambda_arn:
+                    print("Error: Failed to deploy the authorizer Lambda function. Aborting API Gateway deployment.")
+                    return False
+                
+                # Setup API Gateway with the deployed authorizer
+                return deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_arn, api_name, stage_name)
             else:
                 print("No API Gateway requested. Lambda deployment complete.")
                 return True
@@ -232,14 +354,15 @@ def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role
     finally:
         print("Lambda deployment process completed.")
             
-def deploy_api_gateway(function_name, function_arn, region, api_name=None, stage_name="prod"):
+def deploy_api_gateway(function_name, function_arn, region, authorizer_lambda_arn, api_name=None, stage_name="prod"):
     """
-    Deploy an API Gateway v2 HTTP API with Lambda integration and API key authentication
+    Deploy an API Gateway v2 HTTP API with Lambda integration and a Lambda authorizer.
     
     Args:
-        function_name (str): The Lambda function name
-        function_arn (str): The Lambda function ARN
+        function_name (str): The backend Lambda function name
+        function_arn (str): The backend Lambda function ARN
         region (str): AWS region
+        authorizer_lambda_arn (str): ARN of the Lambda authorizer function
         api_name (str): Name for the API Gateway
         stage_name (str): API Gateway stage name
     
@@ -250,13 +373,14 @@ def deploy_api_gateway(function_name, function_arn, region, api_name=None, stage
         api_name = f"{function_name}-api"
     
     print("=" * 80)
-    print(f"Deploying API Gateway ({api_name}) for Lambda function: {function_name}")
+    print(f"Deploying API Gateway ({api_name}) with Lambda Authorizer for: {function_name}")
     print("=" * 80)
     
     # Initialize clients
     apigateway_client = boto3.client('apigatewayv2', region_name=region)
-    apigateway_v1_client = boto3.client('apigateway', region_name=region)
     lambda_client = boto3.client('lambda', region_name=region)
+    sts_client = boto3.client('sts', region_name=region)
+    account_id = sts_client.get_caller_identity()['Account']
     
     try:
         # Step 1: Create or get existing API
@@ -282,8 +406,8 @@ def deploy_api_gateway(function_name, function_arn, region, api_name=None, stage
                     ProtocolType='HTTP',
                     CorsConfiguration={
                         'AllowOrigins': ['*'],
-                        'AllowMethods': ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'HEAD', 'PATCH'],
-                        'AllowHeaders': ['Content-Type', 'X-Amz-Date', 'Authorization', 'X-Api-Key'],
+                        'AllowMethods': ['*'],
+                        'AllowHeaders': ['*'],
                         'MaxAge': 86400
                     }
                 )
@@ -293,34 +417,81 @@ def deploy_api_gateway(function_name, function_arn, region, api_name=None, stage
                 print(f"Error creating API Gateway: {str(e)}")
                 return False
         
-        # Step 2: Create or update the API key
-        api_key_id = None
-        api_key_value = None
-        
+        # Step 2: Create or update the Lambda Authorizer
+        authorizer_name = 'auth-lambda'
+        authorizer_id = None
+        authorizer_uri = f"arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/{authorizer_lambda_arn}/invocations"
+
         try:
-            # Look for existing API key - use the v1 client
-            response = apigateway_v1_client.get_api_keys()
-            for key in response.get('items', []):
-                if key.get('name') == f"{api_name}-key":
-                    api_key_id = key['id']
-                    print(f"Found existing API key: {api_key_id}")
+            # Check if authorizer already exists
+            response = apigateway_client.get_authorizers(ApiId=api_id)
+            for auth in response.get('Items', []):
+                if auth['Name'] == authorizer_name:
+                    authorizer_id = auth['AuthorizerId']
+                    print(f"Found existing authorizer: {authorizer_id}")
+                    apigateway_client.update_authorizer(
+                        ApiId=api_id,
+                        AuthorizerId=authorizer_id,
+                        Name=authorizer_name,
+                        AuthorizerType='REQUEST',
+                        AuthorizerUri=authorizer_uri,
+                        IdentitySource=['$request.header.Authorization'],
+                        AuthorizerPayloadFormatVersion='2.0',
+                        EnableSimpleResponses=True,
+                        AuthorizerResultTtlInSeconds=300
+                    )
+                    print(f"Updated existing authorizer {authorizer_id}")
                     break
-                    
-            if not api_key_id:
-                # Create a new API key - use the v1 client
-                api_key_value = str(uuid.uuid4())
-                response = apigateway_v1_client.create_api_key(
-                    name=f"{api_name}-key",
-                    value=api_key_value,
-                    enabled=True
+
+            if not authorizer_id:
+                # Create new authorizer
+                response = apigateway_client.create_authorizer(
+                    ApiId=api_id,
+                    Name=authorizer_name,
+                    AuthorizerType='REQUEST',
+                    AuthorizerUri=authorizer_uri,
+                    IdentitySource=['$request.header.Authorization'],
+                    AuthorizerPayloadFormatVersion='2.0',
+                    EnableSimpleResponses=True,
+                    AuthorizerResultTtlInSeconds=300
                 )
-                api_key_id = response['id']
-                print(f"Created API key: {api_key_id}")
+                authorizer_id = response['AuthorizerId']
+                print(f"Created new Lambda authorizer: {authorizer_id}")
+
         except Exception as e:
-            print(f"Error managing API key: {str(e)}")
+            print(f"Error creating/updating Lambda authorizer: {str(e)}")
             return False
-        
-        # Step 3: Create or update integration with Lambda
+
+        # Step 2b: Add permission for API Gateway to invoke the *authorizer* Lambda
+        try:
+            authorizer_source_arn = f"arn:aws:execute-api:{region}:{account_id}:{api_id}/authorizers/{authorizer_id}"
+            statement_id_auth = f'apigateway-invoke-authorizer-{api_id}'
+
+            try:
+                 # Check if permission exists for the authorizer
+                 lambda_client.remove_permission(
+                     FunctionName=authorizer_lambda_arn,
+                     StatementId=statement_id_auth,
+                 )
+                 print(f"Removed existing invoke permission for authorizer {authorizer_lambda_arn} (StatementId: {statement_id_auth})")
+            except lambda_client.exceptions.ResourceNotFoundException:
+                 print(f"No existing invoke permission found for authorizer {authorizer_lambda_arn} (StatementId: {statement_id_auth}), proceeding to add.")
+            except Exception as e:
+                 print(f"Warning: Could not remove potentially existing permission for authorizer {authorizer_lambda_arn} (StatementId: {statement_id_auth}): {e}")
+            
+            lambda_client.add_permission(
+                 FunctionName=authorizer_lambda_arn,
+                 StatementId=statement_id_auth,
+                 Action='lambda:InvokeFunction',
+                 Principal='apigateway.amazonaws.com',
+                 SourceArn=authorizer_source_arn
+            )
+            print(f"Added invoke permission for API Gateway to authorizer Lambda: {authorizer_lambda_arn}")
+        except Exception as e:
+            print(f"Error setting invoke permission for authorizer Lambda: {str(e)}")
+            return False
+
+        # Step 3: Create or update integration with backend Lambda
         integration_id = None
         
         try:
@@ -348,73 +519,84 @@ def deploy_api_gateway(function_name, function_arn, region, api_name=None, stage
             print(f"Error setting up Lambda integration: {str(e)}")
             return False
             
-        # Step 4: Create routes for the API
-        route_keys = ['GET /', 'GET /docs', 'GET /{proxy+}', 'POST /{proxy+}']
+        # Step 4: Create or update routes for the API, now using the authorizer
+        # Define the specific routes to configure
+        route_keys_to_ensure = {
+            'GET /': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id},
+            'GET /docs': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id},
+            'GET /{proxy+}': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id},
+            'POST /{proxy+}': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id}
+            # '$default': {'AuthorizationType': 'CUSTOM', 'AuthorizerId': authorizer_id} # Removed default route
+        }
         
-        for route_key in route_keys:
-            try:
-                # Check if route exists
-                route_exists = False
-                try:
-                    response = apigateway_client.get_routes(ApiId=api_id)
-                    for route in response.get('Items', []):
-                        if route['RouteKey'] == route_key:
-                            route_exists = True
-                            print(f"Route already exists: {route_key}")
-                            break
-                except Exception:
-                    pass
-                
-                if not route_exists:
-                    response = apigateway_client.create_route(
-                        ApiId=api_id,
-                        RouteKey=route_key,
-                        Target=f'integrations/{integration_id}',
-                        AuthorizationType='NONE'  # We'll use API key instead
-                    )
-                    print(f"Created route: {route_key}")
-            except Exception as e:
-                print(f"Error creating route {route_key}: {str(e)}")
-                # Continue with other routes
-        
-        # Step 5: Add Lambda permission to allow API Gateway to invoke it
+        # Get existing routes
+        existing_routes = {}
         try:
-            # Get the AWS account ID
-            sts_client = boto3.client('sts', region_name=region)
-            account_id = sts_client.get_caller_identity()['Account']
-            
-            # Create the source ARN with the actual account ID instead of wildcard
-            source_arn = f"arn:aws:execute-api:{region}:{account_id}:{api_id}/*/*"
-            
-            try:
-                # Check if permission exists
-                policy = lambda_client.get_policy(FunctionName=function_name)
-                policy_json = json.loads(policy['Policy'])
-                
-                permission_exists = False
-                for statement in policy_json.get('Statement', []):
-                    if (statement.get('Principal', {}).get('Service') == 'apigateway.amazonaws.com' and 
-                        f":{api_id}/" in statement.get('Condition', {}).get('ArnLike', {}).get('AWS:SourceArn', '')):
-                        permission_exists = True
-                        break
-                        
-                if not permission_exists:
-                    raise lambda_client.exceptions.ResourceNotFoundException('Permission not found')
-                    
-                print("API Gateway permission already exists for Lambda")
-                
-            except (lambda_client.exceptions.ResourceNotFoundException, KeyError, json.JSONDecodeError):
-                # Add permission
-                lambda_client.add_permission(
-                    FunctionName=function_name,
-                    StatementId=f'apigateway-invoke-{int(time.time())}',
-                    Action='lambda:InvokeFunction',
-                    Principal='apigateway.amazonaws.com',
-                    SourceArn=source_arn
-                )
-                print("Added permission for API Gateway to invoke Lambda")
+            paginator = apigateway_client.get_paginator('get_routes')
+            for page in paginator.paginate(ApiId=api_id):
+                for route in page.get('Items', []):
+                    existing_routes[route['RouteKey']] = route['RouteId']
         except Exception as e:
-            print(f"Error setting Lambda permission: {str(e)}")
+            print(f"Warning: Could not retrieve existing routes: {str(e)}")
+
+        for route_key, config in route_keys_to_ensure.items():
+            try:
+                target = f'integrations/{integration_id}'
+                if route_key in existing_routes:
+                    route_id = existing_routes[route_key]
+                    print(f"Updating existing route: {route_key} (ID: {route_id})")
+                    apigateway_client.update_route(
+                        ApiId=api_id,
+                        RouteId=route_id,
+                        RouteKey=route_key,
+                        Target=target,
+                        AuthorizationType=config['AuthorizationType'],
+                        AuthorizerId=config['AuthorizerId']
+                    )
+                else:
+                     print(f"Creating route: {route_key}")
+                     response = apigateway_client.create_route(
+                         ApiId=api_id,
+                         RouteKey=route_key,
+                         Target=target,
+                         AuthorizationType=config['AuthorizationType'],
+                         AuthorizerId=config['AuthorizerId']
+                     )
+                     print(f"Created route: {route_key} (ID: {response['RouteId']})")
+            except Exception as e:
+                print(f"Error creating/updating route {route_key}: {str(e)}")
+
+        # Step 5: Add Lambda permission for the *backend* function (ensure it exists)
+        try:
+            # Source ARN needs to cover all defined routes/methods
+            # Using a wildcard for the method and path within the stage is generally sufficient
+            # for AWS_PROXY integrations, as the specific route determines invocation.
+            source_arn = f"arn:aws:execute-api:{region}:{account_id}:{api_id}/*/*"
+            statement_id_backend = f'apigateway-invoke-backend-{api_id}' # Unique ID for backend
+
+            try:
+                 # Remove potentially existing permission first to avoid conflicts
+                 lambda_client.remove_permission(
+                     FunctionName=function_name,
+                     StatementId=statement_id_backend,
+                 )
+                 print(f"Removed existing invoke permission for backend {function_name} (StatementId: {statement_id_backend})")
+            except lambda_client.exceptions.ResourceNotFoundException:
+                 print(f"No existing invoke permission found for backend {function_name} (StatementId: {statement_id_backend}), proceeding to add.")
+            except Exception as e:
+                 print(f"Warning: Could not remove potentially existing permission for backend {function_name} (StatementId: {statement_id_backend}): {e}")
+
+            # Add the permission
+            lambda_client.add_permission(
+                FunctionName=function_name,
+                StatementId=statement_id_backend,
+                Action='lambda:InvokeFunction',
+                Principal='apigateway.amazonaws.com',
+                SourceArn=source_arn
+            )
+            print(f"Added/Updated permission for API Gateway to invoke backend Lambda: {function_name}")
+        except Exception as e:
+            print(f"Error setting backend Lambda permission: {str(e)}")
             return False
             
         # Step 6: Deploy the API to a stage
@@ -439,83 +621,17 @@ def deploy_api_gateway(function_name, function_arn, region, api_name=None, stage
             print(f"Error creating API stage: {str(e)}")
             return False
             
-        # Step 7: Create usage plan and connect API key
-        try:
-            # Create or get usage plan
-            usage_plan_id = None
-            
-            try:
-                response = apigateway_v1_client.get_usage_plans()
-                for plan in response.get('items', []):
-                    if plan.get('name') == f"{api_name}-usage-plan":
-                        usage_plan_id = plan['id']
-                        print(f"Found existing usage plan: {usage_plan_id}")
-                        break
-            except Exception as e:
-                print(f"Error checking existing usage plans: {str(e)}")
-                
-            if not usage_plan_id:
-                response = apigateway_v1_client.create_usage_plan(
-                    name=f"{api_name}-usage-plan",
-                    description=f"Usage plan for {api_name}",
-                    quota={
-                        'limit': 1000,
-                        'period': 'MONTH'
-                    },
-                    throttle={
-                        'burstLimit': 10,
-                        'rateLimit': 5
-                    }
-                )
-                usage_plan_id = response['id']
-                print(f"Created usage plan: {usage_plan_id}")
-                
-            # Associate stage with usage plan
-            try:
-                apigateway_v1_client.update_usage_plan(
-                    usagePlanId=usage_plan_id,
-                    patchOperations=[
-                        {
-                            'op': 'add',
-                            'path': '/apiStages',
-                            'value': f"{api_id}:{stage_name}"
-                        }
-                    ]
-                )
-                print(f"Associated stage {stage_name} with usage plan")
-            except Exception as e:
-                print(f"Error associating stage with usage plan: {str(e)}")
-                
-            # Associate API key with usage plan
-            try:
-                apigateway_v1_client.create_usage_plan_key(
-                    usagePlanId=usage_plan_id,
-                    keyId=api_key_id,
-                    keyType='API_KEY'
-                )
-                print(f"Associated API key with usage plan")
-            except apigateway_v1_client.exceptions.ConflictException:
-                print(f"API key already associated with usage plan")
-            except Exception as e:
-                print(f"Error associating API key with usage plan: {str(e)}")
-                
-        except Exception as e:
-            print(f"Error setting up usage plan: {str(e)}")
-            return False
-            
-        # Print the API URL and key information
+        # Print the API URL
         api_url = f"https://{api_id}.execute-api.{region}.amazonaws.com/{stage_name}"
         print("\n" + "=" * 80)
-        print(f"API Gateway successfully deployed!")
+        print(f"API Gateway with Lambda Authorizer successfully deployed!")
         print(f"API URL: {api_url}")
-        
-        if api_key_value:
-            print(f"API Key: {api_key_value}")
-            print("\nTo use this API with the key:")
-            print(f"curl -H 'x-api-key: {api_key_value}' {api_url}")
-        else:
-            print("\nTo use this API, you need the API key. You can retrieve it from the AWS console.")
-            print(f"curl -H 'x-api-key: YOUR_API_KEY' {api_url}")
+        print(f"Authorizer Lambda ARN: {authorizer_lambda_arn}")
+        print(f"Backend Lambda ARN: {function_arn}")
+        print(f"\nEnsure requests include the 'Authorization' header for the authorizer.")
+        print(f"Example using curl (replace YOUR_TOKEN):")
+        print(f"curl -H 'Authorization: Bearer YOUR_TOKEN' {api_url}/some/path")
+        print("=" * 80)
             
         return True
         
@@ -535,8 +651,13 @@ def main():
     parser.add_argument('--api-gateway', action='store_true', help='Create an API Gateway with API key authentication')
     parser.add_argument('--api-name', help='Name for the API Gateway (defaults to function-name-api)')
     parser.add_argument('--stage-name', default='prod', help='API Gateway stage name (default: prod)')
+    parser.add_argument('--authorizer-function-name', help='Name for the Lambda authorizer function (required if --api-gateway is set)')
     
     args = parser.parse_args()
+    
+    # Validate authorizer name if API Gateway is requested
+    if args.api_gateway and not args.authorizer_function_name:
+        parser.error("--authorizer-function-name is required when --api-gateway is specified.")
     
     # Determine if we need to build and push a container or use the provided URI
     ecr_image_uri = args.image_uri
@@ -561,7 +682,8 @@ def main():
         args.timeout,
         args.api_gateway,
         args.api_name,
-        args.stage_name
+        args.stage_name,
+        args.authorizer_function_name
     )
     
     if not success:
