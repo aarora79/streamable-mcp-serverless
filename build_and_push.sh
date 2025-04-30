@@ -19,7 +19,7 @@ aws ecr describe-repositories --repository-names "$ECR_REPO_NAME" --region "$AWS
 
 # Build the Docker image (uses uv for Python package management)
 echo "🏗️ Building Docker image with uv package manager..."
-docker build -t "$ECR_REPO_NAME" .
+docker build -t "$ECR_REPO_NAME" . --platform=linux/amd64
 
 # Tag the image
 echo "🏷️ Tagging image..."
