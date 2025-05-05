@@ -1,287 +1,406 @@
-# Deploy a "Streamable-HTTP" MCP server on AWS Lambda and Amazon API Gateway for Amazon Bedrock spend analysis
+# Streamable MCP Server on AWS Lambda with OAuth 2.1 Authorization
 
-This project deploys a Model Context Protocol (MCP) server as a containerized application on AWS Lambda and accessible to clients via an Amazon API Gateway. The MCP protocol now supports [`Streamable-HTTP`](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) which means that the server operates as an independent process that can handle multiple client connections. The server in this repo sends a `Mcp-Session-id` field to the client in the HTTP response header when accepting a new connection and the client then includes this header field in every subsequent request it sends to the server thus enabling session management.
+This project implements a Model Context Protocol (MCP) server as a containerized application on AWS Lambda, accessible via Amazon API Gateway. It showcases the [`Streamable-HTTP`](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) transport along with OAuth 2.1 authorization through AWS Cognito, providing a fully standards-compliant implementation.
 
-The MCP server and client in this repo are both written in TypeScript. The server is built as a container and deployed on a Lambda and is available as an endpoint via an API Gateway. 
+The MCP server in this repo:
+- Uses session management via the `Mcp-Session-id` header
+- Implements OAuth 2.1 authorization at the transport layer
+- Provides tools to analyze Amazon Bedrock usage
 
->Note: as of 4/22/2025 Lambda supports HTTP Streaming for Node.js managed runtime ([link](https://docs.aws.amazon.com/lambda/latest/dg/configuration-response-streaming.html)). API Gateway does not support Service Side Events (SSE) which is why Streamable HTTP comes in handy and we can now deploy an MCP server on Lambda and API Gateway.
+Both server and client are written in TypeScript, with the server deployed as a container on Lambda.
 
-The MCP server in this repo provides a tool to get a summary of the spend on Amazon Bedrock in a given AWS account.
+>Note: As of 4/22/2025 Lambda supports HTTP Streaming for Node.js managed runtime ([documentation](https://docs.aws.amazon.com/lambda/latest/dg/configuration-response-streaming.html)). This implementation leverages that capability to create a fully serverless MCP deployment.
+
+## Key Features
+
+- **Standards Compliance**: Implements both Streamable-HTTP transport and OAuth 2.1 authorization specs
+- **Serverless Deployment**: Runs on AWS Lambda and API Gateway for scalability
+- **Secure Authentication**: Uses AWS Cognito for OAuth 2.1 authentication
+- **Discovery Support**: Implements OAuth discovery flow per RFC9728
+- **Analytics Tool**: Provides Bedrock usage analysis tool
 
 ## Architecture
-
-The following diagram illustrates the architecture of the MCP server deployment:
 
 ![Architecture Diagram](architecture.png)
 
 *Image credit: [https://github.com/aal80/simple-mcp-server-on-lambda](https://github.com/aal80/simple-mcp-server-on-lambda)*
 
 The architecture consists of:
-1. **API Gateway**: Provides the HTTP API endpoint
-2. **Lambda Function**: Runs the containerized MCP server
-3. **ECR**: Stores the Docker container image
-4. **CloudWatch Logs**: Collects and stores logs from both the server and Bedrock usage
-5. **Bedrock**: The underlying model service that the MCP server interacts with
+1. **API Gateway**: HTTP API endpoint with streaming support
+2. **Lambda Function**: Containerized MCP server with OAuth authorization
+3. **ECR**: Container storage
+4. **Cognito**: OAuth 2.1 authentication provider
+5. **CloudWatch Logs**: Server and Bedrock usage logging
+6. **Bedrock**: The foundation model service
 
 ## Prerequisites
 
-1.  **Node.js & npm:** Install Node.js version 18.x or later (which includes npm). This is required for running the server and client locally.
-1.  **Python 3.11:** Required for the deployment script (`deploy.py`).
-1.  **Docker:** Install Docker Desktop or Docker Engine. Required for building the container image for AWS Lambda deployment.
-1.  **AWS Account & CLI:** Required for deployment:
-    *   An active AWS account
-    *   AWS CLI installed and configured with appropriate credentials
-    *   Boto3 Python package
+1. **Node.js & npm:** v18.x or later
+2. **Python 3.11:** For the deployment script
+3. **Docker:** For container building
+4. **AWS Account & CLI:** With appropriate credentials
+5. **CloudWatch Setup:** [Model invocation logs](https://docs.aws.amazon.com/bedrock/latest/userguide/model-invocation-logging.html#setup-cloudwatch-logs-destination) configured
+6. **IAM Permissions:** 
+   - CloudWatch Logs read access ([CloudWatch Logs Read-Only Access](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/CloudWatchLogsReadOnlyAccess.html))
+   - Cost Explorer read access ([Billing policy examples](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/billing-example-policies.html))
 
-1. Setup [model invocation logs](https://docs.aws.amazon.com/bedrock/latest/userguide/model-invocation-logging.html#setup-cloudwatch-logs-destination) in Amazon CloudWatch.
+## Quick Start Guide
 
-1. Ensure that the IAM user/role being used has full read-only access to Amazon Cost Explorer and Amazon CloudWatch, this is required for the MCP server to retrieve data from these services.
+### Local Development
 
-See [here](https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/billing-example-policies.html) and [here](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/CloudWatchLogsReadOnlyAccess.html) for sample policy examples that you can use & modify as per your requirements. 
-
-## Running Locally
-
-You can run both the server and client locally for development and testing purposes.
-
-### Running the Server Locally
-
-1. Install dependencies:
+1. **Install dependencies:**
    ```bash
    npm install
    ```
 
-2. Start the server:
+2. **Start the server locally:**
    ```bash
    npx tsx src/server.ts
    ```
    The server will start on `http://localhost:3000` by default.
 
-### Running the Client Locally
-
-1. The client can be run using the same command:
+3. **Run the client in another terminal:**
    ```bash
    npx tsx src/client.ts
    ```
 
-Example:
-```bash
-# Initialize
-curl -XPOST "http://localhost:3000/prod/mcp" \
--H "Content-Type: application/json" \
--H "Accept: application/json" \
--H "Accept: text/event-stream" \
--d '{
-  "jsonrpc": "2.0",
-  "method": "initialize",
-  "params": {
-    "clientInfo": { "name": "curl-client", "version": "1.0" },
-    "protocolVersion": "2025-03-26",
-    "capabilities": {}
-  },
-  "id": "init-1"
-}'
+4. **Optional authentication:**
+   ```bash
+   # In the client, authenticate with:
+   > auth login
+   ```
+
+### AWS Deployment
+
+1. **Install Python dependencies:**
+   ```bash
+   # Install uv
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   export PATH="$HOME/.local/bin:$PATH"
+
+   # Create a virtual environment and install dependencies
+   uv venv --python 3.11 && source .venv/bin/activate && uv pip install --requirement pyproject.toml
+   ```
+
+2. **Configure AWS Cognito:**
+   - Create a User Pool in AWS Cognito Console
+   - Create an App Client with authorization code grant flow
+   - Configure callback URL (typically http://localhost:8000/callback)
+   - Add allowed scopes: openid, profile
+
+3. **Set environment variables:**
+   ```bash
+   # Server environment variables
+   export COGNITO_REGION="us-east-1"
+   export COGNITO_USER_POOL_ID="<your-user-pool-id>"
+   export COGNITO_ALLOWED_CLIENT_IDS="<your-client-id>"
+   
+   # COGNITO_DOMAIN can be either full domain or just the prefix
+   # Full domain example:
+   export COGNITO_DOMAIN="<your-domain>.auth.us-east-1.amazoncognito.com"
+   # Or just the prefix (domain part will be built automatically):
+   export COGNITO_DOMAIN="<your-domain>"
+   
+   # Client environment variables
+   export OAUTH_CLIENT_ID="<your-client-id>"
+   export OAUTH_REDIRECT_URI="http://localhost:8000/callback"
+   ```
+
+4. **Run deployment script:**
+   ```bash
+   python deploy.py \
+     --function-name mcp-server \
+     --role-arn <lambda-execution-role-arn> \
+     --region us-east-1 \
+     --memory 2048 \
+     --timeout 300 \
+     --api-gateway \
+     --api-name mcp-server-api \
+     --stage-name prod \
+     --cognito-user-pool-id <your-user-pool-id> \
+     --cognito-domain <your-domain-prefix> \
+     --cognito-client-ids <your-client-id>
+   ```
+
+5. **Connect client to deployed server:**
+   ```bash
+   export MCP_SERVER_URL="https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp"
+   npx tsx src/client.ts
+   
+   # At the client prompt
+   > auth login
+   > connect
+   ```
+
+## MCP Protocol Implementation
+
+This project implements two key MCP specifications:
+
+1. **Streamable-HTTP Transport** - Enables stateful connections over HTTP with session management
+2. **OAuth 2.1 Authorization** - Secures API access with standards-compliant authorization
+
+### Streamable-HTTP Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Server
+    
+    Client->>Server: POST /mcp - initialize request
+    Server->>Client: 200 OK with Mcp-Session-Id
+    Note over Client,Server: Client stores session ID
+    
+    Client->>Server: POST /mcp - tools/list (with session ID)
+    Server->>Client: 200 OK with tools list
+    
+    Client->>Server: POST /mcp - tools/call (with session ID)
+    Server->>Client: 200 OK with streaming content
+    
+    Client->>Server: DELETE /mcp (with session ID)
+    Server->>Client: 200 OK - Session terminated
 ```
 
-If successful you should see an output similar to the following:
+### OAuth 2.1 Authorization Flow
 
-```bash
-event: message
-id: 2d11fbfc-f4e8-4738-8de8-60b59324459d_1745362335448_hj5mjalf
-data: {"result":{"protocolVersion":"2024-11-05","capabilities":{"logging":{},"tools":{"listChanged":true},"prompts":{"listChanged":true},"resources":{"listChanged":true}},"serverInfo":{"name":"bedrock-usage-stats-http-server","version":"1.0.1"}},"jsonrpc":"2.0","id":"init-1"}
+```mermaid
+sequenceDiagram
+    participant Client
+    participant MCP Server
+    participant Cognito
+    
+    Client->>MCP Server: Initial Request (no token)
+    MCP Server->>Client: 401 Unauthorized + WWW-Authenticate header
+    Note over Client: Extracts resource_metadata_uri
+    
+    Client->>MCP Server: GET /.well-known/oauth-protected-resource
+    MCP Server->>Client: Resource Metadata (auth server info)
+    
+    Client->>Cognito: GET /.well-known/openid-configuration
+    Cognito->>Client: OAuth/OIDC Endpoints
+    
+    Note over Client: Generate PKCE parameters
+    
+    Client->>Cognito: Authenticate (with PKCE)
+    Cognito->>Client: Access + Refresh Tokens
+    
+    Client->>MCP Server: Request with Bearer Token
+    MCP Server->>Cognito: Verify token
+    Cognito->>MCP Server: Token validation
+    
+    alt Token Valid
+        MCP Server->>Client: 200 Success + Session ID
+    else Invalid Token
+        MCP Server->>Client: 401 Unauthorized
+    end
+    
+    Note over Client: When token expires
+    Client->>Cognito: Refresh token request
+    Cognito->>Client: New access token
 ```
 
-## Deployment Approach
+## Authentication Setup
 
-*   **Container Image:** The Node.js/Express application is packaged into a Docker container image using Node.js 18.
-*   **AWS ECR:** The Docker image is stored in Amazon Elastic Container Registry (ECR).
-*   **AWS Lambda:** A Lambda function is created using the container image from ECR.
-*   **API Gateway:** An HTTP API is created with API key authentication and usage plans.
-*   **CloudWatch Logs:** The server integrates with CloudWatch Logs for monitoring and debugging.
+### Configuring AWS Cognito
 
-## Available Tools
+1. **Create a Cognito User Pool** in the AWS Console
+2. **Create an App Client:**
+   - Set Authorization code grant flow
+   - Add allowed scopes: openid, profile
+   - Configure callback URL as http://localhost:8000/callback
 
-The server implements the following tools:
+### Client Authentication Commands
+
+```bash
+# Login with OAuth 2.1 (with PKCE)
+> auth login
+
+# Check authentication status
+> auth status
+
+# Manually refresh token
+> auth refresh
+
+# Log out
+> auth logout
+```
+
+### Authentication Features
+
+- **OAuth 2.1 Compliance**: Standards-compliant authorization
+- **PKCE Support**: Enhanced security for public clients
+- **JWT Verification**: Token verification via JWKS
+- **Token Refresh**: Automatic refresh with rotation
+- **Discovery**: RFC9728-compliant OAuth discovery with Cognito-specific adaptations
+- **Graceful Fallbacks**: Robust error handling with multiple discovery mechanisms
+
+## Using the Bedrock Report Tool
+
+```bash
+# Default parameters (us-east-1, standard log group, 1 day)
+> bedrock-report
+
+# Custom parameters
+> bedrock-report us-east-1 /aws/bedrock/modelinvocations 7 123456789012
+```
+
+This will produce a detailed report showing:
+- Total requests, tokens, and usage
+- Daily breakdowns
+- Regional summaries
+- Model-specific usage
+- User/role summaries
+
+Example output:
+```
+Tool result:
+Bedrock Daily Usage Report (Past 7 days - us-east-1)
+Total Requests: 13060
+Total Input Tokens: 2992387
+Total Completion Tokens: 254124
+Total Tokens: 3246511
+
+--- Daily Totals ---
+2025-04-06: Requests=8330, Input=1818253, Completion=171794, Total=1990047
+2025-04-07: Requests=4669, Input=936299, Completion=71744, Total=1008043
+...
+
+--- Model Summary ---
+nova-lite-v1:0: Requests=93, Input=177416, Completion=30331, Total=207747
+titan-embed-text-v1: Requests=62, Input=845, Completion=0, Total=845
+...
+```
+
+## Available MCP Tools
+
+The server implements these tools:
 
 1. **greet**: A simple greeting tool that returns a personalized message
-2. **multi-greet**: A tool that sends multiple greetings with delays between them
-3. **bedrock-logs**: A tool for querying AWS Bedrock usage logs
+2. **multi-greet**: A tool that sends multiple greetings with delays
+3. **get_bedrock_usage_report**: A comprehensive Bedrock usage analysis tool
 
-## Deployment Steps
+## Client Command Reference
 
-1. **Install `uv` and Python dependencies needed for deployment to Lambda**
+| Command | Description |
+|---------|-------------|
+| `connect [url]` | Connect to MCP server (default or specified URL) |
+| `disconnect` | Disconnect from server |
+| `terminate-session` | Terminate the current session |
+| `reconnect` | Reconnect to the server |
+| `list-tools` | List available tools on the server |
+| `call-tool <n> [args]` | Call a tool with optional JSON arguments |
+| `greet [name]` | Call the greet tool with optional name |
+| `multi-greet [name]` | Call the multi-greet tool with notifications |
+| `list-resources` | List available resources |
+| `bedrock-report [region] [log_group] [days] [account_id]` | Get Bedrock usage report |
+| `auth login` | Authenticate with the MCP server using OAuth 2.1 |
+| `auth logout` | Clear the stored token |
+| `auth status` | Show current authentication status |
+| `auth refresh` | Force refresh the access token |
+| `debug on off` | Enable or disable debug logging |
+| `help` | Show help information |
+| `quit` | Exit the program |
 
-    ```bash
-    # Install uv if you don't have it
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
+## Advanced Usage
 
-    # Create a virtual environment and install dependencies
-    uv venv --python 3.11 && source .venv/bin/activate && uv pip install --requirement pyproject.toml
-    ```
-
-1.  **Run the Deployment Script:**
-    ```bash
-    python deploy.py \
-      --function-name bedrock-spend-mcp-server \
-      --role-arn <lambda-role-arn> \
-      --region us-east-1 \
-      --memory 2048 \
-      --timeout 300 \
-      --api-gateway \
-      --api-name mcp-server-api \
-      --stage-name prod
-    ```
-
-    The script will:
-    *   Build the Docker image for the correct Lambda architecture (`linux/amd64`)
-    *   Create the ECR repository if it doesn't exist
-    *   Authenticate Docker with ECR
-    *   Push the image to ECR
-    *   Create the Lambda execution IAM role and attach policies
-    *   Create or update the Lambda function
-    *   Create or update the API Gateway with API key authentication
-    *   Set up usage plans and throttling
-
-2.  **Deployment Output:**
-    *   Upon successful completion, the script will print a summary including:
-        *   ECR Image URI
-        *   IAM Role ARN
-        *   Lambda Function ARN
-        *   API Gateway URL
-        *   API Key
-    * Note the API URL as printed out in the output, you should see something similar to:
-      ```bash
-      API Gateway successfully deployed!
-      API URL: https://<api-id>.execute-api.us-east-1.amazonaws.com/prod
-      ```
-
-## Authorization
-
-This deployment supports optional Lambda-based request authorization for the API Gateway.
-
-### How it Works
-
-1.  **Authorizer Lambda:** A separate Python Lambda function (`src/auth/auth.py`) is deployed alongside the main MCP server Lambda.
-2.  **API Gateway Configuration:** When authorization is enabled during deployment, the API Gateway routes are configured to first trigger this authorizer Lambda for incoming requests.
-3.  **Token Check:** The authorizer Lambda expects an `Authorization` header in the format `Bearer <token>` (e.g., `Authorization: Bearer MyTestToken`). It extracts the token part (currently, it accepts *any* token following the `Bearer` prefix due to placeholder validation logic).
-4.  **Allow/Deny:** If the header is present and correctly formatted, the authorizer returns an "Allow" response to API Gateway. Otherwise, it returns "Deny".
-5.  **Backend Invocation:** If allowed, API Gateway proceeds to invoke the main MCP server Lambda (`bedrock` in the example below). If denied, API Gateway returns a `{"message":"Forbidden"}` response directly to the client.
-
-### Enabling Authorization During Deployment
-
-To deploy the API Gateway with the Lambda authorizer enabled, use the `--enable-authorizer` flag and provide a name for the authorizer function using `--authorizer-function-name`:
+### Direct API Calls with curl
 
 ```bash
-python deploy.py \
-  --function-name bedrock \
-  --role-arn <your-lambda-execution-role-arn> \
-  --api-gateway \
-  --enable-authorizer \
-  --authorizer-function-name my-api \
-  # Add other options like --region, --image-uri etc. as needed
-```
-
-This command will:
-* Deploy the main containerized Lambda (`bedrock`).
-* Deploy the authorizer Lambda (`my-api`) from `src/auth/auth.py`.
-* Configure the API Gateway (`bedrock-api`) to use `my-api` as the authorizer for all routes.
-
-### Example Authorized Request
-
-Use the `Authorization: Bearer <your-token>` header when making requests:
-
-```bash
-# Replace <api-id> and <region> with your deployment output
-# Replace MyTestToken with your actual token if you implement real validation
-API_URL="https://li8mz4qlzc.execute-api.us-east-1.amazonaws.com/prod/mcp" # Example URL
-
-curl -XPOST "$API_URL" \
+# Replace with your access token if using authentication
+curl -XPOST "https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -H "Authorization: Bearer MyTestToken" \
-  -d '{"jsonrpc": "2.0","method": "initialize","params": {"clientInfo": { "name": "curl-client", "version": "1.0" },"protocolVersion": "2025-03-26","capabilities": {}},"id": "init-1"}' | cat
+  -H "Authorization: Bearer <access-token>" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "initialize",
+    "params": {
+      "clientInfo": { "name": "curl-client", "version": "1.0" },
+      "protocolVersion": "2025-03-26",
+      "capabilities": {}
+    },
+    "id": "init-1"
+  }' | cat
 ```
 
-If authorization is *not* enabled during deployment, you can omit the `-H "Authorization: Bearer MyTestToken"` header.
+### Environment Variables
 
-## Connecting to the Server
+#### Server Variables
+- `COGNITO_REGION`: AWS region where Cognito is deployed
+- `COGNITO_USER_POOL_ID`: ID of the Cognito user pool
+- `COGNITO_ALLOWED_CLIENT_IDS`: Comma-separated list of allowed client IDs
+- `COGNITO_DOMAIN`: Cognito domain for the user pool (can be full domain like "my-domain.auth.region.amazoncognito.com" or just the prefix like "my-domain")
 
-After deployment, you can connect to the server using the `client.ts` script:
+#### Client Variables
+- `MCP_SERVER_URL`: URL of the MCP server
+- `OAUTH_CLIENT_ID`: Cognito app client ID
+- `OAUTH_REDIRECT_URI`: Redirect URI for OAuth flow
+- `MCP_CLIENT_DEBUG`: Set to 'true' to enable debug logging
+- `ACCESS_TOKEN`: Directly provide an access token (optional)
 
-1. Set the required environment variables:
-   ```bash
-   # note the extra "/mcp" at the end of the API URL 
-   export MCP_SERVER_URL="https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp"
-   ```
-1. Install dependencies:
-    ```bash
-    npm install
-    ```
+## Troubleshooting
 
-1. Run the client:
-   ```bash
-   npx tsx src/client.ts
-   ```
-The client will automatically:
-- Initialize a connection with the server
-- Handle session management
-- Provide an interactive interface for using the available tools
+### Common Issues
 
-1. To get a summary of the Amazon Bedrock spend over the last few days run the `bedrock-report` command on the client CLI.
+1. **Authentication Failures**:
+   - Ensure Cognito user pool and client IDs are correctly configured
+   - Verify the user credentials being used
+   - Try `auth refresh` or `auth login` to obtain fresh tokens
+   - Check Cognito domain format - either provide the full domain (e.g., "my-domain.auth.us-east-1.amazoncognito.com") or just the prefix (e.g., "my-domain")
+   - If you see DNS errors like "getaddrinfo ENOTFOUND", check that your domain format is correct; for user pool IDs with format "region_ID", the correct domain prefix is "region-id" (lowercase with hyphen)
+   - Note that Cognito uses a different OpenID discovery URL format than standard OAuth providers; this implementation handles this automatically by trying both formats
 
-    ```{.bash}
-    >bedrock-report <region> <log-group-name> <number-of-days> <aws-account-id>
-    ```
+2. **Connection Problems**:
+   - Verify the server URL is correct with proper `/mcp` suffix
+   - Check network connectivity to the API Gateway endpoint
+   - Ensure AWS region is correctly specified in environment variables
 
-   The above command should produce an output similar to the following:
+3. **Permission Errors**:
+   - Verify Lambda has appropriate IAM permissions for CloudWatch Logs access
+   - Check that the user/role has Cost Explorer permissions
 
-   ```{.bash}
-   Tool result:
-   Bedrock Daily Usage Report (Past 17 days - us-east-1)
-   Total Requests: 13060
-   Total Input Tokens: 2992387
-   Total Completion Tokens: 254124
-   Total Tokens: 3246511
+4. **Deployment Issues**:
+   - Ensure Docker is running and properly configured for `linux/amd64` builds
+   - Check that AWS CLI has necessary permissions for ECR, Lambda, and API Gateway
 
-   --- Daily Totals ---
-   2025-04-06: Requests=8330, Input=1818253, Completion=171794, Total=1990047
-   2025-04-07: Requests=4669, Input=936299, Completion=71744, Total=1008043
-   2025-04-10: Requests=4, Input=4652, Completion=370, Total=5022
-   2025-04-11: Requests=6, Input=17523, Completion=1201, Total=18724
-   2025-04-13: Requests=27, Input=67524, Completion=4406, Total=71930
-   2025-04-14: Requests=24, Input=148136, Completion=4609, Total=152745
+### Debug Mode
 
-   --- Region Summary ---
-   us-east-1: Requests=13060, Input=2992387, Completion=254124, Total=3246511
+Enable debug logging to troubleshoot connection issues:
 
-   --- Model Summary ---
-   nova-lite-v1:0: Requests=93, Input=177416, Completion=30331, Total=207747
-   titan-embed-text-v1: Requests=62, Input=845, Completion=0, Total=845
-   nova-micro-v1:0: Requests=27, Input=63396, Completion=10225, Total=73621
-   llama3-3-70b-instruct-v1:0: Requests=3749, Input=780568, Completion=58978, Total=839546
-   claude-3-5-sonnet-20241022-v2:0: Requests=5353, Input=846616, Completion=82570, Total=929186
-   command-r-plus-v1:0: Requests=3644, Input=659689, Completion=40900, Total=700589
-   nova-pro-v1:0: Requests=40, Input=116939, Completion=13144, Total=130083
-   claude-3-5-haiku-20241022-v1:0: Requests=88, Input=342266, Completion=17606, Total=359872
-   claude-3-haiku-20240307-v1:0: Requests=4, Input=4652, Completion=370, Total=5022
+```bash
+# In client:
+> debug on
 
-   --- User Summary ---
-   arn:aws:sts::012345678091:assumed-role/role-name/i-0ed8662e2ec5052df: Requests=314, Input=705514, Completion=71676, Total=777190
-   arn:aws:sts::012345678091:assumed-role/role-name/i-0e7fa4b21ef43662a: Requests=1422, Input=232289, Completion=20468, Total=252757
-   arn:aws:sts::012345678091:assumed-role/role-name/i-0a0528a4884da8642: Requests=11324, Input=2054584, Completion=161980, Total=2216564
+# Or as environment variable:
+export MCP_CLIENT_DEBUG=true
+```
 
-   ```
+## Project Structure
 
-## Known issues:
-- Client sometimes fails to call tools, this can be resolved by restarting the client or establishing connection again.
+- `/src/server.ts` - MCP server implementation
+- `/src/client.ts` - MCP client with OAuth support
+- `/src/auth/` - Authorization components
+  - `cognito.ts` - JWT verification logic
+  - `oauthMetadata.ts` - OAuth resource metadata
+  - `oauth2Client.ts` - OAuth client implementation
+
+## Known Issues
+
+- Client occasionally fails to call tools, which can be resolved by reconnecting or restarting
+- Token refresh may sometimes require manual intervention with `auth refresh`
+- Large responses from the Bedrock usage tool may be truncated in certain environments
 
 ## Acknowledgments
 
-This project was developed with the support of the following technologies and services:
+This project was developed with the support of:
 
+- [Model Context Protocol](https://modelcontextprotocol.io/) for the communication protocol
 - [AWS Lambda](https://aws.amazon.com/lambda/) for serverless computing
 - [Amazon API Gateway](https://aws.amazon.com/api-gateway/) for API management
 - [Amazon Bedrock](https://aws.amazon.com/bedrock/) for foundation models
-- [Model Context Protocol](https://modelcontextprotocol.io/) for the communication protocol
-- [Node.js](https://nodejs.org/) and [TypeScript](https://www.typescriptlang.org/) for the implementation
+- [Amazon Cognito](https://aws.amazon.com/cognito/) for authentication
+- [Node.js](https://nodejs.org/) and [TypeScript](https://www.typescriptlang.org/) for implementation
 - [Express.js](https://expressjs.com/) for the web server framework
+
+## License
+
+This project is licensed under the terms in the LICENSE file included in this repository.

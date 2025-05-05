@@ -1,9 +1,8 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
-
-import { CloudWatchLogsClient, FilterLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs"; // Added import
+import { CloudWatchLogsClient, FilterLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs";
 import serverlessExpress from '@codegenie/serverless-express';
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -11,6 +10,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { InMemoryEventStore } from "@modelcontextprotocol/sdk/examples/shared/inMemoryEventStore.js";
 
 import { CallToolResult, GetPromptResult, isInitializeRequest, ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
+
+// Import auth modules
+import { CognitoAuthorizer, createCognitoAuthorizer } from './auth/cognito';
+import { getDefaultResourceMetadataConfig, createResourceMetadataHandler } from './auth/oauthMetadata';
+import { logger, authLogger, apiLogger, logHttpRequest, logHttpResponse } from './logging';
 
 // Create an MCP server with implementation details
 const server = new McpServer({
@@ -304,12 +308,161 @@ server.resource(
 const app = express();
 app.use(express.json());
 
+// Create Cognito authorizer based on environment variables
+const authorizer = createCognitoAuthorizer();
+
+// Setup OAuth 2.0 Protected Resource Metadata endpoint
+const resourceMetadataConfig = getDefaultResourceMetadataConfig();
+
+// Register the OAuth resource metadata endpoint at the root and at /prod to handle both locally and in Lambda
+app.get('/.well-known/oauth-protected-resource', createResourceMetadataHandler(resourceMetadataConfig));
+app.get('/prod/.well-known/oauth-protected-resource', createResourceMetadataHandler(resourceMetadataConfig));
+
+// Add authorization server metadata discovery endpoint
+// This is a convenience endpoint to redirect to the actual Cognito OIDC configuration
+app.get('/.well-known/oauth-authorization-server', (req: Request, res: Response) => {
+  try {
+    authLogger.debug({
+      message: 'Authorization server metadata request received',
+      path: req.path
+    });
+    
+    const authServer = resourceMetadataConfig.authorizationServers[0];
+    if (!authServer || !authServer.metadataUrl) {
+      authLogger.error('No authorization server metadata URL available');
+      return res.status(404).json({
+        error: 'not_found',
+        error_description: 'Authorization server metadata not available'
+      });
+    }
+    
+    // Set CORS headers
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    
+    // Log the redirect
+    authLogger.info(`Redirecting to authorization server metadata: ${authServer.metadataUrl}`);
+    
+    // Redirect to the authorization server's metadata URL (typically Cognito's OIDC configuration)
+    res.redirect(authServer.metadataUrl);
+  } catch (error) {
+    authLogger.error({
+      message: 'Error processing authorization server metadata request',
+      error
+    });
+    res.status(500).json({
+      error: 'server_error',
+      error_description: 'An error occurred while processing the authorization server metadata request'
+    });
+  }
+});
+
+// Also handle the discovery endpoint at the /prod path
+app.get('/prod/.well-known/oauth-authorization-server', (req: Request, res: Response) => {
+  try {
+    const authServer = resourceMetadataConfig.authorizationServers[0];
+    if (!authServer || !authServer.metadataUrl) {
+      return res.status(404).json({
+        error: 'not_found',
+        error_description: 'Authorization server metadata not available'
+      });
+    }
+    
+    // Set CORS headers
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    
+    // Redirect to the authorization server's metadata URL
+    res.redirect(authServer.metadataUrl);
+  } catch (error) {
+    res.status(500).json({
+      error: 'server_error',
+      error_description: 'An error occurred while processing the authorization server metadata request'
+    });
+  }
+});
+
+// Track MCP Protocol Version
+app.use((req, res, next) => {
+  const protocolVersion = req.headers['mcp-protocol-version'];
+  if (protocolVersion) {
+    logger.debug(`Client requested MCP Protocol Version: ${protocolVersion}`);
+    // You can use this to handle version-specific behavior if needed
+  }
+  next();
+});
+
+// Create middleware for logging requests
+app.use((req: Request, res: Response, next: NextFunction) => {
+  // Use enhanced structured logging
+  logHttpRequest(req);
+  
+  // Capture response timing and status code
+  const startTime = Date.now();
+  
+  // Intercept res.end to log response
+  const originalEnd = res.end;
+  res.end = function(...args) {
+    const duration = Date.now() - startTime;
+    logHttpResponse(res, duration);
+    return originalEnd.apply(res, args);
+  };
+  
+  next();
+});
+
 // Map to store transports by session ID
 // TODO: Use a more efficient transport, like a Redis-based transport or maybe DynamoDB-based transport
 const transports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
 
-app.post('/prod/mcp', async (req: Request, res: Response) => {
-  console.log('Received MCP request:', req.body);
+// Define routes that skip authentication
+const publicPaths = [
+  '/.well-known/oauth-protected-resource',
+  '/prod/.well-known/oauth-protected-resource',
+  '/.well-known/oauth-authorization-server',
+  '/prod/.well-known/oauth-authorization-server',
+  '/.well-known/openid-configuration',
+  '/prod/.well-known/openid-configuration',
+];
+
+// Authentication middleware - only applied to protected routes
+const authMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  // Skip authentication for public paths
+  if (publicPaths.some(path => req.path.startsWith(path))) {
+    return next();
+  }
+  
+  // Skip auth check for initialize requests (we'll validate them later)
+  if (req.method === 'POST' && !req.headers['mcp-session-id'] && 
+      req.body && req.body.method === 'initialize') {
+    console.log('Initialization request detected - authentication check skipped at this stage');
+    console.log('isInitializeRequest result:', isInitializeRequest(req.body));
+    console.log('Request method check:', req.body.method === 'initialize');
+    console.log('Request body:', JSON.stringify(req.body));
+    return next();
+  }
+  
+  // For all other requests, check authentication
+  console.log(`Checking authentication for request to ${req.path} with method ${req.method}`);
+  console.log(`Headers: ${JSON.stringify(req.headers)}`);
+  return authorizer.createAuthMiddleware()(req, res, next);
+};
+
+// Apply auth middleware
+app.use(authMiddleware);
+
+// Use '/mcp' for local development, '/prod/mcp' for Lambda
+const isLambda = !!process.env.LAMBDA_TASK_ROOT;
+const mcpEndpoint = isLambda ? '/prod/mcp' : '/mcp';
+
+app.post(mcpEndpoint, async (req: Request, res: Response) => {
+  authLogger.debug({ message: 'Received MCP request', body: req.body });
+  console.log(`MCP request received at ${mcpEndpoint}, method: ${req.method}, sessionId: ${req.headers['mcp-session-id']}`);
+  console.log(`Request body: ${JSON.stringify(req.body)}`);
+  console.log(`Is initialize request: ${req.body && isInitializeRequest(req.body)}`);
+  
   try {
     // Check for existing session ID
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
@@ -317,9 +470,11 @@ app.post('/prod/mcp', async (req: Request, res: Response) => {
 
     if (sessionId && transports[sessionId]) {
       // Reuse existing transport
+      console.log(`Reusing existing transport for session ID: ${sessionId}`);
       transport = transports[sessionId];
-    } else if (!sessionId && isInitializeRequest(req.body)) {
+    } else if (!sessionId && req.body && req.body.method === 'initialize') {
       // New initialization request
+      console.log('Processing new initialization request');
       const eventStore = new InMemoryEventStore();
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
@@ -328,6 +483,7 @@ app.post('/prod/mcp', async (req: Request, res: Response) => {
           // Store the transport by session ID when session is initialized
           // This avoids race conditions where requests might come in before the session is stored
           console.log(`Session initialized with ID: ${sessionId}`);
+          apiLogger.info({ message: 'Session initialized', sessionId });
           transports[sessionId] = transport;
         }
       });
@@ -336,19 +492,24 @@ app.post('/prod/mcp', async (req: Request, res: Response) => {
       transport.onclose = () => {
         const sid = transport.sessionId;
         if (sid && transports[sid]) {
-          console.log(`Transport closed for session ${sid}, removing from transports map`);
+          console.log(`Transport closed for session ID: ${sid}`);
+          apiLogger.info({ message: 'Transport closed', sessionId: sid });
           delete transports[sid];
         }
       };
 
       // Connect the transport to the MCP server BEFORE handling the request
       // so responses can flow back through the same transport
+      console.log('Connecting transport to MCP server...');
       await server.connect(transport);
 
+      console.log('Handling initialization request...');
       await transport.handleRequest(req, res, req.body);
+      console.log('Initialization request handled');
       return; // Already handled
     } else {
       // Invalid request - no session ID or not initialization request
+      console.log('Invalid request - no session ID or not initialization request');
       res.status(400).json({
         jsonrpc: '2.0',
         error: {
@@ -364,7 +525,7 @@ app.post('/prod/mcp', async (req: Request, res: Response) => {
     // The existing transport is already connected to the server
     await transport.handleRequest(req, res, req.body);
   } catch (error) {
-    console.error('Error handling MCP request:', error);
+    logger.error({ message: 'Error handling MCP request', error });
     if (!res.headersSent) {
       res.status(500).json({
         jsonrpc: '2.0',
@@ -379,9 +540,10 @@ app.post('/prod/mcp', async (req: Request, res: Response) => {
 });
 
 // Handle GET requests for SSE streams (using built-in support from StreamableHTTP)
-app.get('/prod/mcp', async (req: Request, res: Response) => {
+app.get(mcpEndpoint, async (req: Request, res: Response) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   if (!sessionId || !transports[sessionId]) {
+    apiLogger.warn({ message: 'Invalid session ID', sessionId });
     res.status(400).send('Invalid or missing session ID');
     return;
   }
@@ -389,9 +551,9 @@ app.get('/prod/mcp', async (req: Request, res: Response) => {
   // Check for Last-Event-ID header for resumability
   const lastEventId = req.headers['last-event-id'] as string | undefined;
   if (lastEventId) {
-    console.log(`Client reconnecting with Last-Event-ID: ${lastEventId}`);
+    apiLogger.info({ message: 'Client reconnecting', sessionId, lastEventId });
   } else {
-    console.log(`Establishing new SSE stream for session ${sessionId}`);
+    apiLogger.info({ message: 'Establishing new SSE stream', sessionId });
   }
 
   const transport = transports[sessionId];
@@ -399,57 +561,58 @@ app.get('/prod/mcp', async (req: Request, res: Response) => {
 });
 
 // Handle DELETE requests for session termination (according to MCP spec)
-app.delete('/prod/mcp', async (req: Request, res: Response) => {
+app.delete(mcpEndpoint, async (req: Request, res: Response) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
   if (!sessionId || !transports[sessionId]) {
+    apiLogger.warn({ message: 'Invalid session ID for termination', sessionId });
     res.status(400).send('Invalid or missing session ID');
     return;
   }
 
-  console.log(`Received session termination request for session ${sessionId}`);
+  apiLogger.info({ message: 'Received session termination request', sessionId });
 
   try {
     const transport = transports[sessionId];
     await transport.handleRequest(req, res);
   } catch (error) {
-    console.error('Error handling session termination:', error);
+    apiLogger.error({ message: 'Error handling session termination', sessionId, error });
     if (!res.headersSent) {
       res.status(500).send('Error processing session termination');
     }
   }
 });
 
-const isLambda = !!process.env.LAMBDA_TASK_ROOT;
-
 let handler: any; // Declare handler outside the if block
 
 if (isLambda) {
   // Start the server
+  logger.info('Starting MCP server in Lambda environment');
   handler = serverlessExpress({ app });
   
 } 
 else {
   const PORT = 3000;
   app.listen(PORT, () => {
-    console.log(`MCP Streamable HTTP Server listening on port ${PORT}`);
+    logger.info(`MCP Streamable HTTP Server listening on port ${PORT}`);
+    logger.info(`OAuth Protected Resource metadata available at: http://localhost:${PORT}/.well-known/oauth-protected-resource`);
   });
 
   // Handle server shutdown
   process.on('SIGINT', async () => {
-    console.log('Shutting down server...');
+    logger.info('Shutting down server...');
 
     // Close all active transports to properly clean up resources
     for (const sessionId in transports) {
       try {
-        console.log(`Closing transport for session ${sessionId}`);
+        logger.info({ message: 'Closing transport', sessionId });
         await transports[sessionId].close();
         delete transports[sessionId];
       } catch (error) {
-        console.error(`Error closing transport for session ${sessionId}:`, error);
+        logger.error({ message: 'Error closing transport', sessionId, error });
       }
     }
     await server.close();
-    console.log('Server shutdown complete');
+    logger.info('Server shutdown complete');
     process.exit(0);
   });
 }
@@ -458,4 +621,3 @@ else {
 if (handler) {
   exports.handler = handler;
 }
-

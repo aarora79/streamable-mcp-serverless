@@ -17,9 +17,9 @@ echo "📦 Creating ECR repository if it doesn't exist..."
 aws ecr describe-repositories --repository-names "$ECR_REPO_NAME" --region "$AWS_REGION" || \
     aws ecr create-repository --repository-name "$ECR_REPO_NAME" --region "$AWS_REGION"
 
-# Build the Docker image (uses uv for Python package management)
-echo "🏗️ Building Docker image with uv package manager..."
-docker build -t "$ECR_REPO_NAME" . --platform=linux/amd64
+# Build the Docker image using buildx for x86_64 architecture
+echo "🏗️ Building Docker image with buildx for x86_64 architecture..."
+docker buildx build --platform linux/amd64 --load -t "$ECR_REPO_NAME" .
 
 # Tag the image
 echo "🏷️ Tagging image..."
