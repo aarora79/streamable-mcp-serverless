@@ -1,13 +1,9 @@
-// For testing we can import types, but we'll use a different approach for Lambda
 import type { JWTVerifyResult } from 'jose';
 import { Request } from 'express';
 
-// Import jwks-rsa which is CommonJS compatible as a fallback
 import jwksClient from 'jwks-rsa';
 import * as https from 'https';
 import { promisify } from 'util';
-
-// Import the logging utilities
 import { logger, authLogger } from '../logging';
 
 /**
@@ -33,7 +29,6 @@ function getJwksUrl(region: string, userPoolId: string): string {
   return `https://cognito-idp.${region}.amazonaws.com/${userPoolId}/.well-known/jwks.json`;
 }
 
-// Interface for JWK (JSON Web Key)
 interface JWK {
   alg: string;
   e: string;
@@ -43,7 +38,6 @@ interface JWK {
   use: string;
 }
 
-// Interface for JWKS (JSON Web Key Set)
 interface JWKS {
   keys: JWK[];
 }

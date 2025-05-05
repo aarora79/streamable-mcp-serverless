@@ -75,7 +75,7 @@ async function promptUser(question: string): Promise<string> {
  * Main entry point for the client
  */
 async function main(): Promise<void> {
-  console.log('MCP Interactive Client (Improved Implementation)');
+  console.log('MCP Interactive Client');
   console.log('==============================================');
   
   // Check if we have a stored token that's not expired
