@@ -40,6 +40,7 @@ const readline = createInterface({
 // Global state for the client
 let sessionId: string | null = null;
 let accessToken: string | null = process.env.ACCESS_TOKEN || null;
+let authMethod = process.env.AUTH_METHOD || 'auto'; // 'oauth', 'lambda', or 'auto'
 
 // Default to localhost:3000/mcp for local development
 // If MCP_SERVER_URL is provided, ensure it doesn't duplicate "/mcp"
@@ -125,6 +126,7 @@ function printHelp(): void {
   console.log('  auth logout               - Clear the stored token');
   console.log('  auth status               - Show the current authentication status');
   console.log('  auth refresh              - Force refresh the access token');
+  console.log('  set-auth-method <method>   - Set authorization method (oauth, lambda, or auto)');
   console.log('  debug [on|off]            - Enable or disable debug logging');
   console.log('  help                       - Show this help');
   console.log('  quit                       - Exit the program');
@@ -194,6 +196,15 @@ function commandLoop(): void {
 
           case 'list-resources':
             await listResources();
+            break;
+
+          case 'set-auth-method':
+            if (args.length < 2 || !['oauth', 'lambda', 'auto'].includes(args[1])) {
+              console.log('Usage: set-auth-method <oauth|lambda|auto>');
+            } else {
+              authMethod = args[1];
+              console.log(`Auth method set to: ${authMethod}`);
+            }
             break;
 
           case 'auth':
@@ -318,8 +329,10 @@ async function connect(url?: string): Promise<void> {
 
   console.log(`Connecting to ${serverUrl}...`);
 
-  // If the token might be expired, try to refresh it first
-  await refreshTokenIfNeeded();
+  // If using OAuth and the token might be expired, try to refresh it first
+  if (authMethod === 'oauth' || authMethod === 'auto') {
+    await refreshTokenIfNeeded();
+  }
 
   // Prepare initialize request
   const initializeRequest = {
@@ -346,10 +359,18 @@ async function connect(url?: string): Promise<void> {
       'Accept': 'application/json, text/event-stream'
     };
     
-    // Add authorization header if we have a token
-    if (accessToken) {
-      headers['Authorization'] = `Bearer ${accessToken}`;
-      console.log('Added Authorization header:', `Bearer ${accessToken.substring(0, 10)}...`);
+    // Add authorization header based on auth method
+    if (authMethod === 'oauth' || authMethod === 'auto') {
+      // Add OAuth token if available
+      if (accessToken) {
+        headers['Authorization'] = `Bearer ${accessToken}`;
+        console.log('Added OAuth Authorization header:', `Bearer ${accessToken.substring(0, 10)}...`);
+      }
+    } else if (authMethod === 'lambda') {
+      // For Lambda authorizer, use a simple Bearer token
+      // The original Lambda authorizer accepts any properly formatted Bearer token
+      headers['Authorization'] = `Bearer token-for-lambda-authorizer`;
+      console.log('Added Lambda Authorization header with placeholder token');
     }
     
     // Make the request
@@ -391,9 +412,22 @@ async function connect(url?: string): Promise<void> {
     
     // Check for 401 status and WWW-Authenticate header
     if (error.statusCode === 401) {
-      console.log('\x1b[31mAuthentication required. Please run "auth login" to authenticate.\x1b[0m');
+      console.log('\x1b[31mAuthentication required.\x1b[0m');
       
-      // Check for resource metadata URI
+      // If using auto mode, try switching to Lambda auth
+      if (authMethod === 'auto') {
+        console.log('Trying Lambda authorization method...');
+        authMethod = 'lambda';
+        try {
+          await connect(serverUrl);
+          return;
+        } catch (lambdaError) {
+          console.error('Lambda authorization also failed:', lambdaError.message);
+          authMethod = 'auto'; // Reset to auto for next attempt
+        }
+      }
+      
+      // Check for resource metadata URI for OAuth
       if (error.headers && error.headers['www-authenticate']) {
         const wwwAuthHeader = error.headers['www-authenticate'];
         const match = wwwAuthHeader.match(/resource_metadata_uri="([^"]+)"/);
@@ -443,9 +477,15 @@ async function terminateSession(): Promise<void> {
       'mcp-session-id': sessionId
     };
     
-    // Add authorization header if we have a token
-    if (accessToken) {
-      headers['Authorization'] = `Bearer ${accessToken}`;
+    // Add authorization header based on auth method
+    if (authMethod === 'oauth' || authMethod === 'auto') {
+      // Add OAuth token if available
+      if (accessToken) {
+        headers['Authorization'] = `Bearer ${accessToken}`;
+      }
+    } else if (authMethod === 'lambda') {
+      // For Lambda authorizer, use a simple Bearer token
+      headers['Authorization'] = `Bearer token-for-lambda-authorizer`;
     }
     
     // Make DELETE request to terminate the session
@@ -493,9 +533,15 @@ async function listTools(): Promise<void> {
       'mcp-session-id': sessionId
     };
     
-    // Add authorization header if we have a token
-    if (accessToken) {
-      headers['Authorization'] = `Bearer ${accessToken}`;
+    // Add authorization header based on auth method
+    if (authMethod === 'oauth' || authMethod === 'auto') {
+      // Add OAuth token if available
+      if (accessToken) {
+        headers['Authorization'] = `Bearer ${accessToken}`;
+      }
+    } else if (authMethod === 'lambda') {
+      // For Lambda authorizer, use a simple Bearer token
+      headers['Authorization'] = `Bearer token-for-lambda-authorizer`;
     }
     
     // Make the request
@@ -571,9 +617,15 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<vo
       'mcp-session-id': sessionId
     };
     
-    // Add authorization header if we have a token
-    if (accessToken) {
-      headers['Authorization'] = `Bearer ${accessToken}`;
+    // Add authorization header based on auth method
+    if (authMethod === 'oauth' || authMethod === 'auto') {
+      // Add OAuth token if available
+      if (accessToken) {
+        headers['Authorization'] = `Bearer ${accessToken}`;
+      }
+    } else if (authMethod === 'lambda') {
+      // For Lambda authorizer, use a simple Bearer token
+      headers['Authorization'] = `Bearer token-for-lambda-authorizer`;
     }
     
     // Make the request
@@ -664,9 +716,15 @@ async function listResources(): Promise<void> {
       'mcp-session-id': sessionId
     };
     
-    // Add authorization header if we have a token
-    if (accessToken) {
-      headers['Authorization'] = `Bearer ${accessToken}`;
+    // Add authorization header based on auth method
+    if (authMethod === 'oauth' || authMethod === 'auto') {
+      // Add OAuth token if available
+      if (accessToken) {
+        headers['Authorization'] = `Bearer ${accessToken}`;
+      }
+    } else if (authMethod === 'lambda') {
+      // For Lambda authorizer, use a simple Bearer token
+      headers['Authorization'] = `Bearer token-for-lambda-authorizer`;
     }
     
     // Make the request

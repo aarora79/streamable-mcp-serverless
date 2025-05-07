@@ -1,10 +1,13 @@
-# Streamable MCP Server on AWS Lambda with OAuth 2.1 Authorization
+# Streamable MCP Server on AWS Lambda with Multiple Authorization Options
 
-This project implements a Model Context Protocol (MCP) server as a containerized application on AWS Lambda, accessible via Amazon API Gateway. It showcases the [`Streamable-HTTP`](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) transport along with OAuth 2.1 authorization through AWS Cognito, providing a fully standards-compliant implementation.
+This project implements a Model Context Protocol (MCP) server as a containerized application on AWS Lambda, accessible via Amazon API Gateway. It showcases the [`Streamable-HTTP`](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) transport along with multiple authorization options:
+
+1. **OAuth 2.1 Authorization** through AWS Cognito
+2. **Lambda Authorizer** for simpler token-based authorization
 
 The MCP server in this repo:
 - Uses session management via the `Mcp-Session-id` header
-- Implements OAuth 2.1 authorization at the transport layer
+- Supports both OAuth 2.1 and Lambda authorizer methods
 - Provides tools to analyze Amazon Bedrock usage
 
 Both server and client are written in TypeScript, with the server deployed as a container on Lambda.
@@ -15,6 +18,7 @@ Both server and client are written in TypeScript, with the server deployed as a 
 
 - **Standards Compliance**: Implements both Streamable-HTTP transport and OAuth 2.1 authorization specs
 - **Serverless Deployment**: Runs on AWS Lambda and API Gateway for scalability
+- **Multiple Authorization Options**: Supports both OAuth 2.1 and Lambda authorizer methods
 - **Secure Authentication**: Uses AWS Cognito for OAuth 2.1 authentication
 - **Discovery Support**: Implements OAuth discovery flow per RFC9728
 - **Analytics Tool**: Provides Bedrock usage analysis tool
@@ -32,6 +36,62 @@ The architecture consists of:
 4. **Cognito**: OAuth 2.1 authentication provider
 5. **CloudWatch Logs**: Server and Bedrock usage logging
 6. **Bedrock**: The foundation model service
+
+## Authorization Options
+
+This project supports two authorization methods:
+
+### 1. OAuth 2.1 Authorization
+
+Uses AWS Cognito as the OAuth provider with full OAuth 2.1 compliance:
+
+- Standards-compliant authorization with Cognito
+- PKCE support for enhanced security
+- JWT verification via JWKS
+- Token refresh with rotation
+- RFC9728-compliant OAuth discovery
+
+To deploy with OAuth authorization:
+
+```bash
+python deploy.py \
+  --function-name mcp-server \
+  --role-arn <lambda-execution-role-arn> \
+  --region us-east-1 \
+  --memory 2048 \
+  --timeout 300 \
+  --api-gateway \
+  --api-name mcp-server-api \
+  --stage-name prod \
+  --auth-method oauth \
+  --cognito-user-pool-id <your-user-pool-id> \
+  --cognito-domain <your-domain-prefix> \
+  --cognito-client-ids <your-client-id>
+```
+
+### 2. Lambda Authorizer
+
+Uses a separate Lambda function to authorize requests:
+
+- Simple token-based authorization
+- API Gateway integration
+- Accepts any properly formatted Bearer token
+
+To deploy with Lambda authorizer:
+
+```bash
+python deploy.py \
+  --function-name mcp-server \
+  --role-arn <lambda-execution-role-arn> \
+  --region us-east-1 \
+  --memory 2048 \
+  --timeout 300 \
+  --api-gateway \
+  --api-name mcp-server-api \
+  --stage-name prod \
+  --auth-method lambda \
+  --lambda-authorizer-name mcp-authorizer
+```
 
 ## Prerequisites
 
@@ -125,10 +185,22 @@ The architecture consists of:
 5. **Connect client to deployed server:**
    ```bash
    export MCP_SERVER_URL="https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp"
+   
+   # For OAuth 2.1 authentication
+   export AUTH_METHOD=oauth
+   export OAUTH_CLIENT_ID="<your-client-id>"
+   export OAUTH_REDIRECT_URI="http://localhost:8000/callback"
+   
+   # Or for Lambda authorizer
+   export AUTH_METHOD=lambda
+   
    npx tsx src/client.ts
    
-   # At the client prompt
+   # At the client prompt (for OAuth)
    > auth login
+   > connect
+   
+   # Or for Lambda authorizer
    > connect
    ```
 
@@ -296,6 +368,7 @@ The server implements these tools:
 | `auth logout` | Clear the stored token |
 | `auth status` | Show current authentication status |
 | `auth refresh` | Force refresh the access token |
+| `set-auth-method <method>` | Set authorization method (oauth, lambda, or auto) |
 | `debug on off` | Enable or disable debug logging |
 | `help` | Show help information |
 | `quit` | Exit the program |
@@ -332,6 +405,7 @@ curl -XPOST "https://<api-id>.execute-api.<region>.amazonaws.com/prod/mcp" \
 
 #### Client Variables
 - `MCP_SERVER_URL`: URL of the MCP server
+- `AUTH_METHOD`: Authorization method to use (`oauth`, `lambda`, or `auto`)
 - `OAUTH_CLIENT_ID`: Cognito app client ID
 - `OAUTH_REDIRECT_URI`: Redirect URI for OAuth flow
 - `MCP_CLIENT_DEBUG`: Set to 'true' to enable debug logging

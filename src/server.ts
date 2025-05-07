@@ -12,7 +12,7 @@ import { InMemoryEventStore } from "@modelcontextprotocol/sdk/examples/shared/in
 import { CallToolResult, GetPromptResult, isInitializeRequest, ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 
 // Import auth modules
-import { CognitoAuthorizer, createCognitoAuthorizer } from './auth/cognito';
+import { createAuthorizer } from './auth';
 import { getDefaultResourceMetadataConfig, createResourceMetadataHandler } from './auth/oauthMetadata';
 import { logger, authLogger, apiLogger, logHttpRequest, logHttpResponse } from './logging';
 
@@ -22,7 +22,12 @@ const server = new McpServer({
   version: '1.0.1',
 }, { capabilities: { logging: {} } });
 
-// Register a simple tool that returns a greeting
+// Get the authorization method from environment variable
+const authMethod = process.env.AUTH_METHOD || 'oauth';
+console.log(`Using authorization method: ${authMethod}`);
+
+// Create the appropriate authorizer
+const authorizer = createAuthorizer(authMethod as 'oauth' | 'lambda');
 server.tool(
   'greet',
   'A simple greeting tool',
@@ -309,7 +314,7 @@ const app = express();
 app.use(express.json());
 
 // Create Cognito authorizer based on environment variables
-const authorizer = createCognitoAuthorizer();
+// const authorizer = createCognitoAuthorizer();
 
 // Setup OAuth 2.0 Protected Resource Metadata endpoint
 const resourceMetadataConfig = getDefaultResourceMetadataConfig();

@@ -139,8 +139,215 @@ def format_cognito_domain(domain, user_pool_id, region):
         domain = f"{domain}.auth.{region}.amazoncognito.com"
     
     return domain
+def create_lambda_authorizer_function(lambda_client, function_name, role_arn, region):
+    """
+    Create a Lambda authorizer function using the original auth.py code.
+    
+    Args:
+        lambda_client: The boto3 Lambda client
+        function_name: Name for the Lambda authorizer function
+        role_arn: ARN of the Lambda execution role
+        region: AWS region
+        
+    Returns:
+        str: The ARN of the created Lambda function
+    """
+    print("=" * 80)
+    print(f"Creating Lambda authorizer function: {function_name}")
+    print("=" * 80)
+    
+    try:
+        # Create a ZIP deployment package with auth.py
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
+            with open('src/auth/auth.py', 'rb') as auth_file:
+                zip_file.writestr('auth.py', auth_file.read())
+        
+        zip_buffer.seek(0)
+        
+        # Check if function already exists
+        try:
+            lambda_client.get_function(FunctionName=function_name)
+            function_exists = True
+            print(f"Lambda authorizer function {function_name} already exists. Updating...")
+        except lambda_client.exceptions.ResourceNotFoundException:
+            function_exists = False
+            print(f"Lambda authorizer function {function_name} does not exist. Creating new function...")
+        
+        if function_exists:
+            # Update existing function
+            response = lambda_client.update_function_code(
+                FunctionName=function_name,
+                ZipFile=zip_buffer.read()
+            )
+        else:
+            # Create new function
+            response = lambda_client.create_function(
+                FunctionName=function_name,
+                Runtime='python3.9',
+                Role=role_arn,
+                Handler='auth.lambda_handler',
+                Code={'ZipFile': zip_buffer.read()},
+                Timeout=10
+            )
+        
+        # Get the function ARN
+        function_arn = response['FunctionArn']
+        print(f"Lambda authorizer function deployed: {function_arn}")
+        
+        # Wait for function to be active
+        print("Waiting for Lambda authorizer function to be ready...")
+        function_state = ""
+        max_attempts = 10
+        attempts = 0
+        
+        while function_state != "Active" and attempts < max_attempts:
+            time.sleep(5)
+            attempts += 1
+            function_info = lambda_client.get_function(FunctionName=function_name)
+            function_state = function_info['Configuration']['State']
+            print(f"Current state: {function_state}")
+        
+        if function_state == "Active":
+            print(f"Successfully deployed Lambda authorizer function: {function_name}")
+            return function_arn
+        else:
+            print(f"Function deployment did not reach Active state in time. Last state: {function_state}")
+            return None
+            
+    except Exception as e:
+        print(f"Error deploying Lambda authorizer function: {str(e)}")
+        return None
 
-def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role_arn, region="us-east-1", memory_size=1024, timeout=90, api_gateway=False, api_name=None, stage_name="prod", cognito_user_pool_id=None, cognito_domain=None, cognito_client_ids=None):
+def attach_lambda_authorizer(apigateway_client, api_id, authorizer_name, function_arn, region):
+    """
+    Attach a Lambda authorizer to an API Gateway.
+    
+    Args:
+        apigateway_client: The boto3 API Gateway client
+        api_id: The ID of the API Gateway
+        authorizer_name: The name for the authorizer
+        function_arn: The ARN of the Lambda authorizer function
+        region: AWS region
+        
+    Returns:
+        str: The ID of the created authorizer
+    """
+    print("=" * 80)
+    print(f"Attaching Lambda authorizer to API Gateway: {api_id}")
+    print("=" * 80)
+    
+    try:
+        # Check if authorizer exists
+        authorizer_id = None
+        try:
+            authorizers = apigateway_client.get_authorizers(ApiId=api_id)
+            for authorizer in authorizers.get('Items', []):
+                if authorizer['Name'] == authorizer_name:
+                    authorizer_id = authorizer['AuthorizerId']
+                    print(f"Found existing authorizer: {authorizer_id}")
+                    break
+        except Exception as e:
+            print(f"Error checking existing authorizers: {str(e)}")
+        
+        # Format the Lambda function ARN for API Gateway invocation
+        # Convert from: arn:aws:lambda:region:account-id:function:function-name
+        # To: arn:aws:apigateway:region:lambda:path/2015-03-31/functions/arn:aws:lambda:region:account-id:function:function-name/invocations
+        sts_client = boto3.client('sts', region_name=region)
+        account_id = sts_client.get_caller_identity()['Account']
+        
+        # Extract function name from ARN
+        function_name = function_arn.split(':')[-1]
+        if function_name.startswith('function:'):
+            function_name = function_name[9:]  # Remove 'function:' prefix
+            
+        # Construct the proper invocation URI for API Gateway
+        invocation_uri = f"arn:aws:apigateway:{region}:lambda:path/2015-03-31/functions/arn:aws:lambda:{region}:{account_id}:function:{function_name}/invocations"
+        
+        print(f"Using Lambda invocation URI: {invocation_uri}")
+        
+        # Create or update authorizer
+        if authorizer_id:
+            # Update existing authorizer
+            response = apigateway_client.update_authorizer(
+                ApiId=api_id,
+                AuthorizerId=authorizer_id,
+                AuthorizerPayloadFormatVersion='2.0',
+                AuthorizerType='REQUEST',
+                AuthorizerUri=invocation_uri,
+                EnableSimpleResponses=True,
+                IdentitySource=['$request.header.Authorization']
+            )
+            authorizer_id = response['AuthorizerId']
+            print(f"Updated Lambda authorizer: {authorizer_id}")
+        else:
+            # Create new authorizer
+            response = apigateway_client.create_authorizer(
+                ApiId=api_id,
+                AuthorizerPayloadFormatVersion='2.0',
+                AuthorizerType='REQUEST',
+                AuthorizerUri=invocation_uri,
+                EnableSimpleResponses=True,
+                IdentitySource=['$request.header.Authorization'],
+                Name=authorizer_name
+            )
+            authorizer_id = response['AuthorizerId']
+            print(f"Created Lambda authorizer: {authorizer_id}")
+        
+        # Add Lambda permission for API Gateway to invoke the authorizer
+        lambda_client = boto3.client('lambda', region_name=region)
+        
+        # Source ARN for the authorizer
+        source_arn = f"arn:aws:execute-api:{region}:{account_id}:{api_id}/authorizers/{authorizer_id}"
+        
+        try:
+            # Remove potentially existing permission first to avoid conflicts
+            lambda_client.remove_permission(
+                FunctionName=function_name,
+                StatementId=f'apigateway-auth-{api_id}'
+            )
+        except Exception:
+            pass  # Ignore if permission doesn't exist
+        
+        # Add permission for API Gateway to invoke the authorizer
+        lambda_client.add_permission(
+            FunctionName=function_name,
+            StatementId=f'apigateway-auth-{api_id}',
+            Action='lambda:InvokeFunction',
+            Principal='apigateway.amazonaws.com',
+            SourceArn=source_arn
+        )
+        
+        print(f"Added permission for API Gateway to invoke Lambda authorizer")
+        
+        # Update routes to use the authorizer
+        routes = apigateway_client.get_routes(ApiId=api_id)
+        for route in routes.get('Items', []):
+            # Skip public paths
+            if any(route['RouteKey'].endswith(path) for path in [
+                '/.well-known/oauth-protected-resource',
+                '/.well-known/oauth-authorization-server',
+                '/.well-known/openid-configuration'
+            ]):
+                continue
+                
+            try:
+                apigateway_client.update_route(
+                    ApiId=api_id,
+                    RouteId=route['RouteId'],
+                    AuthorizerId=authorizer_id,
+                    AuthorizationType='CUSTOM'
+                )
+                print(f"Updated route {route['RouteKey']} to use Lambda authorizer")
+            except Exception as e:
+                print(f"Error updating route {route['RouteKey']}: {str(e)}")
+        
+        return authorizer_id
+        
+    except Exception as e:
+        print(f"Error attaching Lambda authorizer: {str(e)}")
+        return None
+def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role_arn, region="us-east-1", memory_size=1024, timeout=90, api_gateway=False, api_name=None, stage_name="prod", cognito_user_pool_id=None, cognito_domain=None, cognito_client_ids=None, auth_method="oauth"):
     """
     Deploy a container from ECR as a Lambda function with optional API Gateway.
     
@@ -155,6 +362,10 @@ def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role
         api_gateway (bool): Whether to create an API Gateway for the Lambda
         api_name (str): Name for the API Gateway (defaults to function-name-api)
         stage_name (str): API Gateway stage name
+        cognito_user_pool_id (str): ID of the Cognito user pool (for OAuth method)
+        cognito_domain (str): Cognito domain for the user pool (for OAuth method)
+        cognito_client_ids (str): Comma-separated list of allowed client IDs (for OAuth method)
+        auth_method (str): Authorization method to use ('oauth' or 'lambda')
     """
     print("=" * 80)
     print(f"Deploying Lambda function {function_name} in region {region}...")
@@ -222,18 +433,21 @@ def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role
             if bedrock_role_arn is not None:
                 env_vars['BEDROCK_ROLE_ARN'] = bedrock_role_arn
             
-            # Add Cognito environment variables if provided
-            if cognito_user_pool_id:
+            # Add authorization environment variables
+            env_vars['AUTH_METHOD'] = auth_method
+            
+            # Add Cognito environment variables if using OAuth
+            if auth_method == 'oauth' and cognito_user_pool_id:
                 env_vars['COGNITO_USER_POOL_ID'] = cognito_user_pool_id
                 env_vars['COGNITO_REGION'] = region
             
-            if cognito_domain or cognito_user_pool_id:
-                formatted_domain = format_cognito_domain(cognito_domain, cognito_user_pool_id, region)
-                env_vars['COGNITO_DOMAIN'] = formatted_domain
-                print(f"Setting COGNITO_DOMAIN: {formatted_domain}")
-                
-            if cognito_client_ids:
-                env_vars['COGNITO_ALLOWED_CLIENT_IDS'] = cognito_client_ids
+                if cognito_domain or cognito_user_pool_id:
+                    formatted_domain = format_cognito_domain(cognito_domain, cognito_user_pool_id, region)
+                    env_vars['COGNITO_DOMAIN'] = formatted_domain
+                    print(f"Setting COGNITO_DOMAIN: {formatted_domain}")
+                    
+                if cognito_client_ids:
+                    env_vars['COGNITO_ALLOWED_CLIENT_IDS'] = cognito_client_ids
                 
             env = {
                 'Variables': env_vars
@@ -284,7 +498,6 @@ def deploy_lambda_container(ecr_image_uri, function_name, role_arn, bedrock_role
         return False
     finally:
         print("Lambda deployment process completed.")
-            
 def deploy_api_gateway(function_name, function_arn, region, api_name=None, stage_name="prod"):
     """
     Deploy an API Gateway v2 HTTP API with Lambda integration.
@@ -487,7 +700,7 @@ def deploy_api_gateway(function_name, function_arn, region, api_name=None, stage
         print(f"Error deploying API Gateway: {str(e)}")
         return False
 
-def main():
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Deploy a container from ECR as a Lambda function')
     parser.add_argument('--image-uri', required=False, help='ECR image URI to deploy (if not provided, will build and push container)')
     parser.add_argument('--function-name', required=True, help='Name for the Lambda function')
@@ -499,11 +712,21 @@ def main():
     parser.add_argument('--api-gateway', action='store_true', help='Create an API Gateway')
     parser.add_argument('--api-name', help='Name for the API Gateway (defaults to function-name-api)')
     parser.add_argument('--stage-name', default='prod', help='API Gateway stage name (default: prod)')
+    parser.add_argument('--auth-method', choices=['oauth', 'lambda'], default='oauth', help='Authorization method to use (oauth or lambda)')
+    parser.add_argument('--lambda-authorizer-name', help='Name for the Lambda authorizer function (required if auth-method is lambda)')
     parser.add_argument('--cognito-user-pool-id', help='AWS Cognito User Pool ID for authorization')
     parser.add_argument('--cognito-domain', help='AWS Cognito domain name for authorization')
     parser.add_argument('--cognito-client-ids', help='Comma-separated list of allowed Cognito client IDs')
     
     args = parser.parse_args()
+    
+    # Validate auth method arguments
+    if args.auth_method == 'lambda' and not args.lambda_authorizer_name:
+        print("Error: --lambda-authorizer-name is required when using --auth-method=lambda")
+        sys.exit(1)
+    
+    if args.auth_method == 'oauth' and not args.cognito_user_pool_id:
+        print("Warning: --cognito-user-pool-id is recommended when using --auth-method=oauth")
     
     # Determine if we need to build and push a container or use the provided URI
     ecr_image_uri = args.image_uri
@@ -529,13 +752,65 @@ def main():
         args.api_gateway,
         args.api_name,
         args.stage_name,
-        args.cognito_user_pool_id,
-        args.cognito_domain,
-        args.cognito_client_ids
+        args.cognito_user_pool_id if args.auth_method == 'oauth' else None,
+        args.cognito_domain if args.auth_method == 'oauth' else None,
+        args.cognito_client_ids if args.auth_method == 'oauth' else None,
+        args.auth_method
     )
     
     if not success:
         sys.exit(1)
-
-if __name__ == '__main__':
-    main()
+    
+    # If using Lambda authorizer, deploy it
+    if args.auth_method == 'lambda' and args.api_gateway:
+        lambda_client = boto3.client('lambda', region_name=args.region)
+        apigateway_client = boto3.client('apigatewayv2', region_name=args.region)
+        
+        # Get the API ID
+        api_id = None
+        api_name = args.api_name or f"{args.function_name}-api"
+        
+        try:
+            response = apigateway_client.get_apis()
+            for api in response.get('Items', []):
+                if api['Name'] == api_name:
+                    api_id = api['ApiId']
+                    break
+        except Exception as e:
+            print(f"Error getting API ID: {str(e)}")
+            sys.exit(1)
+        
+        if not api_id:
+            print(f"Could not find API with name: {api_name}")
+            sys.exit(1)
+        
+        # Deploy the Lambda authorizer
+        authorizer_arn = create_lambda_authorizer_function(
+            lambda_client,
+            args.lambda_authorizer_name,
+            args.role_arn,
+            args.region
+        )
+        
+        if not authorizer_arn:
+            print("Failed to deploy Lambda authorizer. Exiting.")
+            sys.exit(1)
+        
+        # Attach the authorizer to the API Gateway
+        authorizer_id = attach_lambda_authorizer(
+            apigateway_client,
+            api_id,
+            args.lambda_authorizer_name,
+            authorizer_arn,
+            args.region
+        )
+        
+        if not authorizer_id:
+            print("Failed to attach Lambda authorizer to API Gateway. Exiting.")
+            sys.exit(1)
+        
+        print("\n" + "=" * 80)
+        print(f"Lambda authorizer successfully deployed and attached to API Gateway!")
+        print(f"API ID: {api_id}")
+        print(f"Authorizer ID: {authorizer_id}")
+        print("=" * 80)
