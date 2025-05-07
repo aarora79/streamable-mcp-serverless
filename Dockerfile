@@ -1,4 +1,4 @@
-# Use Node.js 18 as the base image
+# Use Node.js 18 as the base image for Lambda
 FROM public.ecr.aws/lambda/nodejs:18
 
 # Set working directory
@@ -8,14 +8,14 @@ WORKDIR ${LAMBDA_TASK_ROOT}
 COPY package*.json ./
 COPY tsconfig.json ./
 
-# Install dependencies
+# Install dependencies - including dev dependencies for building
 RUN npm install
 
-# Copy source code
+# Copy source code and tests
 COPY src/ ./src/
 
 # Build TypeScript files
-RUN npx tsc
+RUN npm run build && ls -la dist/
 
-# Set the CMD to your handler
+# The Lambda handler
 CMD [ "dist/server.handler" ]
