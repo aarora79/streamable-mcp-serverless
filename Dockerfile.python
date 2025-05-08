@@ -1,0 +1,34 @@
+# 1. Use an official Python runtime as a parent image
+FROM python:3.10-slim
+
+# 2. Install git, curl, install uv.
+#    Verify uv installation by checking its version using the new path.
+#    Clean up.
+RUN apt-get update && \
+    apt-get install -y git curl --no-install-recommends && \
+    curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    # Verify uv installation from its new location
+    /root/.local/bin/uv --version && \
+    apt-get purge -y --auto-remove curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# 3. Set the working directory in the container
+WORKDIR /app
+
+# 4. Clone the python-sdk repository
+RUN git clone https://github.com/modelcontextprotocol/python-sdk.git
+
+# 5. Install the python-sdk from the cloned repository using uv, into the system environment
+RUN /root/.local/bin/uv pip install --system ./python-sdk
+
+# 6. Copy the local src directory (containing server.py and other modules) into the container
+COPY src/ ./src/
+
+# 7. Install dependencies for server.py using uv, into the system environment
+RUN /root/.local/bin/uv pip install --system click anyio pydantic starlette uvicorn
+
+# 8. Expose port 3000 to the host (as used by server.py default)
+EXPOSE 3000
+
+# 9. Define the command to run the application directly
+CMD [ "python", "src/server.py", "--port", "3000" ]
